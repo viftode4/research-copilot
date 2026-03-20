@@ -30,7 +30,7 @@ class TestDatabaseConfig:
 class TestCopilotConfig:
     def test_default_config(self):
         config = CopilotConfig()
-        assert config.model == "claude-opus-4-6"
+        assert config.model == "claude-sonnet-4-6"
         assert config.max_budget_usd == 5.0
         assert config.max_turns == 50
 

@@ -21,6 +21,8 @@ from pydantic import BaseModel
 
 from research_copilot.config import load_config
 from research_copilot.domain.automl import DOMAIN_SYSTEM_PROMPT
+from research_copilot.mcp_servers.knowledge_base import _store as kb_store
+from research_copilot.mcp_servers.slurm import _mock_jobs
 from research_copilot.mcp_servers.registry import execute_tool, get_tool_schemas
 
 app = FastAPI(title="Research Copilot", version="0.1.0")
@@ -66,10 +68,13 @@ class SessionInfo(BaseModel):
 
 
 def _get_client(api_key: str | None = None) -> anthropic.Anthropic:
-    """Create Anthropic client. Uses provided key (BYOK) or falls back to env var."""
+    """Create Anthropic client. Supports BYOK, proxy URL, or default env var."""
+    kwargs: dict[str, Any] = {}
     if api_key:
-        return anthropic.Anthropic(api_key=api_key)
-    return anthropic.Anthropic()
+        kwargs["api_key"] = api_key
+    if config.api_base_url:
+        kwargs["base_url"] = config.api_base_url
+    return anthropic.Anthropic(**kwargs)
 
 
 async def _run_tool_loop(
@@ -278,6 +283,107 @@ async def health():
         "status": "ok",
         "model": config.model,
         "api_key_set": has_key,
+        "api_proxy": config.api_base_url or None,
         "tools_count": len(get_tool_schemas()),
         "sessions_count": len(_sessions),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Dashboard API — direct access to knowledge base data
+# ---------------------------------------------------------------------------
+
+
+@app.get("/api/experiments")
+async def list_experiments():
+    """List all experiments with full details."""
+    return kb_store["experiments"]
+
+
+@app.get("/api/experiments/{experiment_id}")
+async def get_experiment_detail(experiment_id: str):
+    """Get a single experiment by ID."""
+    for exp in kb_store["experiments"]:
+        if exp["id"] == experiment_id:
+            return exp
+    return {"error": "Not found"}
+
+
+@app.get("/api/insights")
+async def list_insights():
+    """List all insights."""
+    return kb_store["insights"]
+
+
+@app.get("/api/papers")
+async def list_papers():
+    """List all saved papers."""
+    return kb_store["papers"]
+
+
+@app.get("/api/context")
+async def list_context():
+    """List all research context entries."""
+    return kb_store["context"]
+
+
+@app.get("/api/jobs")
+async def list_slurm_jobs():
+    """List all Slurm jobs (mock or real)."""
+    return [
+        {
+            "job_id": j.job_id,
+            "name": j.name,
+            "status": j.status,
+            "partition": j.partition,
+            "gpus": j.gpus,
+            "submitted_at": j.submitted_at,
+            "started_at": j.started_at,
+            "completed_at": j.completed_at,
+        }
+        for j in _mock_jobs.values()
+    ]
+
+
+@app.get("/api/dashboard")
+async def dashboard_stats():
+    """Aggregate stats for the dashboard overview."""
+    experiments = kb_store["experiments"]
+    insights = kb_store["insights"]
+    papers = kb_store["papers"]
+    context = kb_store["context"]
+
+    status_counts: dict[str, int] = {}
+    for exp in experiments:
+        s = exp.get("status", "unknown")
+        status_counts[s] = status_counts.get(s, 0) + 1
+
+    category_counts: dict[str, int] = {}
+    for ins in insights:
+        c = ins.get("category", "unknown")
+        category_counts[c] = category_counts.get(c, 0) + 1
+
+    return {
+        "experiments": {
+            "total": len(experiments),
+            "by_status": status_counts,
+            "recent": experiments[-5:],
+        },
+        "insights": {
+            "total": len(insights),
+            "by_category": category_counts,
+            "recent": insights[-5:],
+        },
+        "papers": {
+            "total": len(papers),
+            "recent": papers[-5:],
+        },
+        "context": {
+            "total": len(context),
+            "entries": context,
+        },
+        "jobs": {
+            "total": len(_mock_jobs),
+            "active": sum(1 for j in _mock_jobs.values() if j.status in ("PENDING", "RUNNING")),
+        },
     }

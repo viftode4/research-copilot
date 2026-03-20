@@ -5,615 +5,417 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Research Copilot</title>
     <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
     <style>
         :root {
-            --bg: #fafafa;
-            --surface: #ffffff;
-            --border: #e5e7eb;
-            --text: #1f2937;
-            --text-secondary: #6b7280;
-            --accent: #2563eb;
-            --accent-light: #eff6ff;
-            --tool-bg: #f0fdf4;
-            --tool-border: #86efac;
-            --code-bg: #f3f4f6;
-            --thinking-bg: #fefce8;
+            --bg: #f8fafc; --surface: #ffffff; --border: #e2e8f0;
+            --text: #1e293b; --text-secondary: #64748b; --text-muted: #94a3b8;
+            --accent: #2563eb; --accent-light: #eff6ff;
+            --green: #16a34a; --green-light: #f0fdf4; --green-border: #86efac;
+            --red: #dc2626; --red-light: #fef2f2;
+            --yellow: #ca8a04; --yellow-light: #fefce8;
+            --sidebar-w: 220px;
         }
-
         * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif; background: var(--bg); color: var(--text); height: 100vh; display: flex; overflow: hidden; }
 
-        body {
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
-            background: var(--bg);
-            color: var(--text);
-            height: 100vh;
-            display: flex;
-            flex-direction: column;
-        }
+        /* Sidebar */
+        .sidebar { width: var(--sidebar-w); background: var(--surface); border-right: 1px solid var(--border); display: flex; flex-direction: column; flex-shrink: 0; }
+        .sidebar-header { padding: 16px 20px; border-bottom: 1px solid var(--border); }
+        .sidebar-header h1 { font-size: 16px; font-weight: 700; display: flex; align-items: center; gap: 8px; }
+        .sidebar-nav { flex: 1; padding: 8px; display: flex; flex-direction: column; gap: 2px; }
+        .nav-item { display: flex; align-items: center; gap: 10px; padding: 10px 12px; border-radius: 8px; cursor: pointer; font-size: 14px; color: var(--text-secondary); transition: all 0.15s; border: none; background: none; width: 100%; text-align: left; }
+        .nav-item:hover { background: var(--bg); color: var(--text); }
+        .nav-item.active { background: var(--accent-light); color: var(--accent); font-weight: 500; }
+        .nav-item .icon { width: 18px; text-align: center; }
+        .nav-item .badge { margin-left: auto; background: var(--bg); border-radius: 10px; padding: 1px 8px; font-size: 11px; font-weight: 600; }
+        .sidebar-footer { padding: 12px 16px; border-top: 1px solid var(--border); }
+        .sidebar-footer button { width: 100%; padding: 8px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); cursor: pointer; font-size: 13px; color: var(--text-secondary); }
+        .sidebar-footer button:hover { border-color: var(--accent); color: var(--accent); }
 
-        header {
-            background: var(--surface);
-            border-bottom: 1px solid var(--border);
-            padding: 12px 24px;
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
-            flex-shrink: 0;
-        }
+        /* Main */
+        .main { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
+        .view { display: none; flex: 1; flex-direction: column; overflow: hidden; }
+        .view.active { display: flex; }
 
-        header h1 {
-            font-size: 18px;
-            font-weight: 600;
-            display: flex;
-            align-items: center;
-            gap: 8px;
-        }
-
-        header h1 span { font-size: 20px; }
-
-        .header-meta {
-            font-size: 12px;
-            color: var(--text-secondary);
-            display: flex;
-            gap: 16px;
-        }
-
-        .header-meta .dot {
-            width: 6px; height: 6px;
-            background: #22c55e;
-            border-radius: 50%;
-            display: inline-block;
-        }
-
-        #messages {
-            flex: 1;
-            overflow-y: auto;
-            padding: 24px;
-            display: flex;
-            flex-direction: column;
-            gap: 16px;
-        }
-
-        .message {
-            max-width: 800px;
-            width: 100%;
-            margin: 0 auto;
-        }
-
-        .message.user {
-            display: flex;
-            justify-content: flex-end;
-        }
-
-        .message.user .bubble {
-            background: var(--accent);
-            color: white;
-            border-radius: 16px 16px 4px 16px;
-            padding: 10px 16px;
-            max-width: 70%;
-        }
-
-        .message.assistant .bubble {
-            background: var(--surface);
-            border: 1px solid var(--border);
-            border-radius: 4px 16px 16px 16px;
-            padding: 16px 20px;
-            line-height: 1.6;
-        }
-
-        .message.assistant .bubble h1,
-        .message.assistant .bubble h2,
-        .message.assistant .bubble h3 {
-            margin-top: 16px;
-            margin-bottom: 8px;
-        }
-
-        .message.assistant .bubble h1:first-child,
-        .message.assistant .bubble h2:first-child,
-        .message.assistant .bubble h3:first-child {
-            margin-top: 0;
-        }
-
+        /* Chat view */
+        #chat-messages { flex: 1; overflow-y: auto; padding: 24px; display: flex; flex-direction: column; gap: 12px; }
+        .message { max-width: 780px; width: 100%; margin: 0 auto; }
+        .message.user { display: flex; justify-content: flex-end; }
+        .message.user .bubble { background: var(--accent); color: white; border-radius: 16px 16px 4px 16px; padding: 10px 16px; max-width: 70%; }
+        .message.assistant .bubble { background: var(--surface); border: 1px solid var(--border); border-radius: 4px 16px 16px 16px; padding: 16px 20px; line-height: 1.65; }
+        .message.assistant .bubble h1,.message.assistant .bubble h2,.message.assistant .bubble h3 { margin: 16px 0 8px; }
+        .message.assistant .bubble h1:first-child,.message.assistant .bubble h2:first-child,.message.assistant .bubble h3:first-child { margin-top: 0; }
         .message.assistant .bubble p { margin-bottom: 8px; }
         .message.assistant .bubble p:last-child { margin-bottom: 0; }
-
-        .message.assistant .bubble ul,
-        .message.assistant .bubble ol {
-            margin: 8px 0;
-            padding-left: 24px;
-        }
-
-        .message.assistant .bubble code {
-            background: var(--code-bg);
-            padding: 2px 6px;
-            border-radius: 4px;
-            font-size: 13px;
-        }
-
-        .message.assistant .bubble pre {
-            background: #1e293b;
-            color: #e2e8f0;
-            border-radius: 8px;
-            padding: 12px 16px;
-            overflow-x: auto;
-            margin: 8px 0;
-        }
-
-        .message.assistant .bubble pre code {
-            background: none;
-            padding: 0;
-            color: inherit;
-        }
-
-        .tool-indicator {
-            max-width: 800px;
-            width: 100%;
-            margin: 0 auto;
-            display: flex;
-            align-items: center;
-            gap: 8px;
-            padding: 6px 12px;
-            background: var(--tool-bg);
-            border: 1px solid var(--tool-border);
-            border-radius: 8px;
-            font-size: 13px;
-            color: #166534;
-        }
-
-        .tool-indicator .spinner {
-            width: 14px; height: 14px;
-            border: 2px solid #86efac;
-            border-top-color: #166534;
-            border-radius: 50%;
-            animation: spin 0.8s linear infinite;
-        }
-
+        .message.assistant .bubble ul,.message.assistant .bubble ol { margin: 8px 0; padding-left: 24px; }
+        .message.assistant .bubble code { background: #f1f5f9; padding: 2px 6px; border-radius: 4px; font-size: 13px; }
+        .message.assistant .bubble pre { background: #1e293b; color: #e2e8f0; border-radius: 8px; padding: 12px 16px; overflow-x: auto; margin: 8px 0; }
+        .message.assistant .bubble pre code { background: none; padding: 0; color: inherit; }
+        .tool-indicator { max-width: 780px; width: 100%; margin: 0 auto; display: flex; align-items: center; gap: 8px; padding: 6px 12px; background: var(--green-light); border: 1px solid var(--green-border); border-radius: 8px; font-size: 13px; color: #166534; }
+        .tool-indicator .spinner { width: 14px; height: 14px; border: 2px solid var(--green-border); border-top-color: #166534; border-radius: 50%; animation: spin 0.8s linear infinite; }
         @keyframes spin { to { transform: rotate(360deg); } }
+        .cost-badge { display: inline-block; font-size: 11px; color: var(--text-muted); margin-top: 8px; }
 
-        .input-area {
-            background: var(--surface);
-            border-top: 1px solid var(--border);
-            padding: 16px 24px;
-            flex-shrink: 0;
-        }
+        .chat-input { background: var(--surface); border-top: 1px solid var(--border); padding: 16px 24px; flex-shrink: 0; }
+        .chat-input .wrapper { max-width: 780px; margin: 0 auto; display: flex; gap: 8px; }
+        .chat-input textarea { flex: 1; border: 1px solid var(--border); border-radius: 12px; padding: 12px 16px; font-size: 14px; font-family: inherit; outline: none; resize: none; min-height: 24px; max-height: 150px; }
+        .chat-input textarea:focus { border-color: var(--accent); }
+        .chat-input button { background: var(--accent); color: white; border: none; border-radius: 12px; padding: 0 20px; font-size: 14px; font-weight: 500; cursor: pointer; }
+        .chat-input button:disabled { opacity: 0.4; cursor: not-allowed; }
 
-        .input-wrapper {
-            max-width: 800px;
-            margin: 0 auto;
-            display: flex;
-            gap: 8px;
-        }
+        /* Dashboard panels */
+        .panel-header { padding: 20px 24px; border-bottom: 1px solid var(--border); background: var(--surface); flex-shrink: 0; }
+        .panel-header h2 { font-size: 18px; font-weight: 600; }
+        .panel-header p { font-size: 13px; color: var(--text-secondary); margin-top: 2px; }
+        .panel-body { flex: 1; overflow-y: auto; padding: 24px; }
 
-        #user-input {
-            flex: 1;
-            border: 1px solid var(--border);
-            border-radius: 12px;
-            padding: 12px 16px;
-            font-size: 15px;
-            font-family: inherit;
-            outline: none;
-            resize: none;
-            min-height: 24px;
-            max-height: 150px;
-            transition: border-color 0.2s;
-        }
+        /* Stats cards */
+        .stats-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 16px; margin-bottom: 24px; }
+        .stat-card { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 16px 20px; }
+        .stat-card .label { font-size: 12px; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.5px; }
+        .stat-card .value { font-size: 28px; font-weight: 700; margin-top: 4px; }
+        .stat-card .sub { font-size: 12px; color: var(--text-muted); margin-top: 2px; }
 
-        #user-input:focus { border-color: var(--accent); }
+        /* Tables */
+        .data-table { width: 100%; border-collapse: collapse; }
+        .data-table th { text-align: left; padding: 10px 16px; font-size: 12px; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.5px; border-bottom: 1px solid var(--border); background: var(--bg); }
+        .data-table td { padding: 12px 16px; font-size: 14px; border-bottom: 1px solid var(--border); vertical-align: top; }
+        .data-table tr:hover { background: var(--bg); }
+        .data-table .empty { text-align: center; padding: 40px; color: var(--text-muted); }
 
-        #send-btn {
-            background: var(--accent);
-            color: white;
-            border: none;
-            border-radius: 12px;
-            padding: 0 20px;
-            font-size: 15px;
-            font-weight: 500;
-            cursor: pointer;
-            transition: opacity 0.2s;
-            white-space: nowrap;
-        }
+        /* Badges */
+        .badge { display: inline-block; padding: 2px 10px; border-radius: 12px; font-size: 12px; font-weight: 500; }
+        .badge.planned { background: #eff6ff; color: #1d4ed8; }
+        .badge.running { background: var(--yellow-light); color: var(--yellow); }
+        .badge.completed { background: var(--green-light); color: var(--green); }
+        .badge.failed { background: var(--red-light); color: var(--red); }
+        .badge.cancelled { background: #f1f5f9; color: var(--text-secondary); }
+        .badge.finding { background: var(--green-light); color: var(--green); }
+        .badge.failure { background: var(--red-light); color: var(--red); }
+        .badge.hypothesis { background: #eff6ff; color: #1d4ed8; }
+        .badge.observation { background: var(--yellow-light); color: var(--yellow); }
+        .badge.technique { background: #f5f3ff; color: #7c3aed; }
 
-        #send-btn:hover { opacity: 0.9; }
-        #send-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+        /* Detail panel */
+        .detail-panel { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 20px; margin-bottom: 16px; }
+        .detail-panel h3 { font-size: 15px; margin-bottom: 12px; }
+        .detail-panel .field { margin-bottom: 8px; }
+        .detail-panel .field-label { font-size: 12px; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.5px; }
+        .detail-panel .field-value { font-size: 14px; margin-top: 2px; }
+        .detail-panel pre { background: #1e293b; color: #e2e8f0; border-radius: 8px; padding: 12px; font-size: 13px; overflow-x: auto; margin-top: 4px; }
+        .tag { display: inline-block; background: var(--bg); border: 1px solid var(--border); border-radius: 4px; padding: 1px 8px; font-size: 12px; margin: 2px; }
 
-        .welcome {
-            max-width: 600px;
-            margin: auto;
-            text-align: center;
-            padding: 40px 20px;
-        }
+        /* Chart */
+        .chart-container { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 20px; margin-bottom: 24px; }
+        .chart-container h3 { font-size: 14px; margin-bottom: 12px; color: var(--text-secondary); }
+        .chart-container canvas { max-height: 250px; }
 
-        .welcome h2 { font-size: 24px; margin-bottom: 8px; }
-        .welcome p { color: var(--text-secondary); margin-bottom: 24px; }
+        /* Welcome */
+        .welcome { margin: auto; text-align: center; padding: 40px 20px; max-width: 550px; }
+        .welcome h2 { font-size: 22px; margin-bottom: 8px; }
+        .welcome p { color: var(--text-secondary); margin-bottom: 24px; font-size: 14px; }
+        .suggestions { display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; }
+        .suggestion { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 8px 14px; font-size: 13px; cursor: pointer; transition: all 0.15s; }
+        .suggestion:hover { border-color: var(--accent); background: var(--accent-light); }
 
-        .suggestions {
-            display: flex;
-            flex-wrap: wrap;
-            gap: 8px;
-            justify-content: center;
-        }
-
-        .suggestion {
-            background: var(--surface);
-            border: 1px solid var(--border);
-            border-radius: 8px;
-            padding: 8px 14px;
-            font-size: 13px;
-            cursor: pointer;
-            transition: all 0.2s;
-        }
-
-        .suggestion:hover {
-            border-color: var(--accent);
-            background: var(--accent-light);
-        }
-
-        .cost-badge {
-            display: inline-block;
-            font-size: 11px;
-            color: var(--text-secondary);
-            margin-top: 8px;
-        }
-
-        /* Settings panel */
-        .settings-btn {
-            background: none;
-            border: 1px solid var(--border);
-            border-radius: 6px;
-            padding: 4px 10px;
-            font-size: 12px;
-            color: var(--text-secondary);
-            cursor: pointer;
-            transition: all 0.2s;
-        }
-
-        .settings-btn:hover { border-color: var(--accent); color: var(--accent); }
-
-        .settings-panel {
-            display: none;
-            position: fixed;
-            top: 0; right: 0;
-            width: 360px;
-            height: 100vh;
-            background: var(--surface);
-            border-left: 1px solid var(--border);
-            padding: 24px;
-            z-index: 100;
-            box-shadow: -4px 0 12px rgba(0,0,0,0.08);
-        }
-
-        .settings-panel.open { display: block; }
-
-        .settings-panel h3 {
-            font-size: 16px;
-            margin-bottom: 20px;
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-        }
-
-        .settings-panel .close-btn {
-            background: none; border: none;
-            font-size: 20px; cursor: pointer;
-            color: var(--text-secondary);
-        }
-
-        .settings-panel label {
-            display: block;
-            font-size: 13px;
-            font-weight: 500;
-            margin-bottom: 6px;
-            color: var(--text);
-        }
-
-        .settings-panel input {
-            width: 100%;
-            padding: 8px 12px;
-            border: 1px solid var(--border);
-            border-radius: 8px;
-            font-size: 14px;
-            font-family: monospace;
-            outline: none;
-            margin-bottom: 16px;
-        }
-
-        .settings-panel input:focus { border-color: var(--accent); }
-
-        .settings-panel .hint {
-            font-size: 12px;
-            color: var(--text-secondary);
-            margin-top: -12px;
-            margin-bottom: 16px;
-        }
-
-        .settings-panel .key-status {
-            font-size: 13px;
-            padding: 8px 12px;
-            border-radius: 8px;
-            margin-bottom: 16px;
-        }
-
-        .key-status.set { background: var(--tool-bg); color: #166534; }
-        .key-status.unset { background: #fef2f2; color: #991b1b; }
-
-        .settings-panel select {
-            width: 100%;
-            padding: 8px 12px;
-            border: 1px solid var(--border);
-            border-radius: 8px;
-            font-size: 14px;
-            outline: none;
-            margin-bottom: 16px;
-            background: white;
-        }
+        /* Settings modal */
+        .modal-overlay { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.3); z-index: 200; justify-content: center; align-items: center; }
+        .modal-overlay.open { display: flex; }
+        .modal { background: var(--surface); border-radius: 16px; padding: 28px; width: 420px; max-width: 90vw; box-shadow: 0 20px 60px rgba(0,0,0,0.15); }
+        .modal h3 { font-size: 17px; margin-bottom: 20px; }
+        .modal label { display: block; font-size: 13px; font-weight: 500; margin-bottom: 6px; }
+        .modal input, .modal select { width: 100%; padding: 9px 12px; border: 1px solid var(--border); border-radius: 8px; font-size: 14px; outline: none; margin-bottom: 4px; }
+        .modal input:focus, .modal select:focus { border-color: var(--accent); }
+        .modal .hint { font-size: 12px; color: var(--text-muted); margin-bottom: 16px; }
+        .modal .key-status { font-size: 13px; padding: 8px 12px; border-radius: 8px; margin-bottom: 16px; }
+        .modal .key-status.set { background: var(--green-light); color: #166534; }
+        .modal .key-status.unset { background: var(--red-light); color: #991b1b; }
+        .modal .btn-row { display: flex; justify-content: flex-end; gap: 8px; margin-top: 20px; }
+        .modal .btn-row button { padding: 8px 20px; border-radius: 8px; font-size: 14px; cursor: pointer; border: 1px solid var(--border); background: var(--surface); }
+        .modal .btn-row button.primary { background: var(--accent); color: white; border-color: var(--accent); }
     </style>
 </head>
 <body>
-    <header>
-        <h1><span>&#x1F52C;</span> Research Copilot</h1>
-        <div class="header-meta">
-            <span id="key-indicator"><span class="dot"></span> Connected</span>
-            <span id="session-label">New session</span>
-            <button class="settings-btn" onclick="toggleSettings()">Settings</button>
+    <!-- Sidebar -->
+    <div class="sidebar">
+        <div class="sidebar-header"><h1>&#x1F52C; Research Copilot</h1></div>
+        <nav class="sidebar-nav">
+            <button class="nav-item active" onclick="showView('chat')"><span class="icon">&#x1F4AC;</span> Chat</button>
+            <button class="nav-item" onclick="showView('experiments')"><span class="icon">&#x1F9EA;</span> Experiments <span class="badge" id="exp-count">0</span></button>
+            <button class="nav-item" onclick="showView('insights')"><span class="icon">&#x1F4A1;</span> Insights <span class="badge" id="ins-count">0</span></button>
+            <button class="nav-item" onclick="showView('papers')"><span class="icon">&#x1F4D1;</span> Papers <span class="badge" id="pap-count">0</span></button>
+            <button class="nav-item" onclick="showView('jobs')"><span class="icon">&#x1F5A5;</span> Jobs <span class="badge" id="job-count">0</span></button>
+        </nav>
+        <div class="sidebar-footer">
+            <button onclick="openSettings()">&#x2699; Settings</button>
         </div>
-    </header>
-
-    <div class="settings-panel" id="settings-panel">
-        <h3>Settings <button class="close-btn" onclick="toggleSettings()">&times;</button></h3>
-
-        <label for="api-key-input">Anthropic API Key</label>
-        <input type="password" id="api-key-input" placeholder="sk-ant-..." oninput="saveApiKey()">
-        <div class="hint">Stored in your browser only. Never sent to our server.</div>
-        <div class="key-status" id="key-status"></div>
-
-        <label for="model-select">Model</label>
-        <select id="model-select" onchange="saveModel()">
-            <option value="claude-sonnet-4-6">Claude Sonnet 4.6 ($3/$15 per MTok)</option>
-            <option value="claude-opus-4-6">Claude Opus 4.6 ($5/$25 per MTok)</option>
-            <option value="claude-haiku-4-5">Claude Haiku 4.5 ($1/$5 per MTok)</option>
-        </select>
-        <div class="hint">Sonnet recommended for daily use. Opus for complex reasoning.</div>
     </div>
 
-    <div id="messages">
-        <div class="welcome" id="welcome">
-            <h2>Research Copilot</h2>
-            <p>AI-powered assistant for your ML research. Search papers, track experiments, manage your knowledge base.</p>
-            <div class="suggestions">
-                <div class="suggestion" onclick="sendSuggestion(this)">Search for recent papers on learning curve extrapolation</div>
-                <div class="suggestion" onclick="sendSuggestion(this)">What experiments have we run so far?</div>
-                <div class="suggestion" onclick="sendSuggestion(this)">Design an experiment to test PFN with mu-weighting</div>
-                <div class="suggestion" onclick="sendSuggestion(this)">What's in the knowledge base?</div>
+    <!-- Main content -->
+    <div class="main">
+        <!-- Chat View -->
+        <div class="view active" id="view-chat">
+            <div id="chat-messages">
+                <div class="welcome" id="welcome">
+                    <h2>Research Copilot</h2>
+                    <p>AI-powered assistant for your ML research. Search papers, track experiments, manage your knowledge base.</p>
+                    <div class="suggestions">
+                        <div class="suggestion" onclick="sendSuggestion(this)">Search for recent papers on learning curve extrapolation</div>
+                        <div class="suggestion" onclick="sendSuggestion(this)">What experiments have we run?</div>
+                        <div class="suggestion" onclick="sendSuggestion(this)">Design an experiment to test PFN with mu-weighting</div>
+                        <div class="suggestion" onclick="sendSuggestion(this)">What's in the knowledge base?</div>
+                    </div>
+                </div>
+            </div>
+            <div class="chat-input">
+                <div class="wrapper">
+                    <textarea id="user-input" rows="1" placeholder="Ask about papers, experiments, or your research..." autofocus></textarea>
+                    <button id="send-btn" onclick="sendMessage()">Send</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Experiments View -->
+        <div class="view" id="view-experiments">
+            <div class="panel-header"><h2>Experiments</h2><p>All tracked experiments and their results</p></div>
+            <div class="panel-body">
+                <div class="stats-row" id="exp-stats"></div>
+                <div class="chart-container"><h3>Experiments by Status</h3><canvas id="exp-chart"></canvas></div>
+                <table class="data-table"><thead><tr><th>Name</th><th>Status</th><th>Dataset</th><th>Model</th><th>Created</th></tr></thead><tbody id="exp-table-body"></tbody></table>
+            </div>
+        </div>
+
+        <!-- Insights View -->
+        <div class="view" id="view-insights">
+            <div class="panel-header"><h2>Insights</h2><p>Research findings, failures, and observations</p></div>
+            <div class="panel-body">
+                <div class="stats-row" id="ins-stats"></div>
+                <div id="insights-list"></div>
+            </div>
+        </div>
+
+        <!-- Papers View -->
+        <div class="view" id="view-papers">
+            <div class="panel-header"><h2>Papers</h2><p>Saved paper references from literature search</p></div>
+            <div class="panel-body">
+                <table class="data-table"><thead><tr><th>Title</th><th>Authors</th><th>Year</th><th>Tags</th></tr></thead><tbody id="papers-table-body"></tbody></table>
+            </div>
+        </div>
+
+        <!-- Jobs View -->
+        <div class="view" id="view-jobs">
+            <div class="panel-header"><h2>Slurm Jobs</h2><p>Cluster job submissions and their status</p></div>
+            <div class="panel-body">
+                <div class="stats-row" id="job-stats"></div>
+                <table class="data-table"><thead><tr><th>Job ID</th><th>Name</th><th>Status</th><th>GPUs</th><th>Submitted</th></tr></thead><tbody id="jobs-table-body"></tbody></table>
             </div>
         </div>
     </div>
 
-    <div class="input-area">
-        <div class="input-wrapper">
-            <textarea id="user-input" rows="1" placeholder="Ask about papers, experiments, or your research..." autofocus></textarea>
-            <button id="send-btn" onclick="sendMessage()">Send</button>
+    <!-- Settings Modal -->
+    <div class="modal-overlay" id="settings-modal">
+        <div class="modal">
+            <h3>Settings</h3>
+            <label for="api-key-input">Anthropic API Key</label>
+            <input type="password" id="api-key-input" placeholder="sk-ant-..." oninput="saveApiKey()">
+            <div class="hint">Stored in your browser only. Never sent to our server for storage.</div>
+            <div class="key-status" id="key-status"></div>
+            <label for="model-select">Model</label>
+            <select id="model-select" onchange="saveModel()">
+                <option value="claude-sonnet-4-6">Claude Sonnet 4.6 — $3/$15 per MTok (recommended)</option>
+                <option value="claude-opus-4-6">Claude Opus 4.6 — $5/$25 per MTok (complex reasoning)</option>
+                <option value="claude-haiku-4-5">Claude Haiku 4.5 — $1/$5 per MTok (fast & cheap)</option>
+            </select>
+            <div class="hint">Sonnet is best for daily use. Opus for deep analysis.</div>
+            <div class="btn-row"><button class="primary" onclick="closeSettings()">Done</button></div>
         </div>
     </div>
 
-    <script>
-        let sessionId = null;
-        let isStreaming = false;
+<script>
+// --- State ---
+let sessionId = null, isStreaming = false;
+const $ = id => document.getElementById(id);
 
-        const messagesEl = document.getElementById('messages');
-        const inputEl = document.getElementById('user-input');
-        const sendBtn = document.getElementById('send-btn');
-        const welcomeEl = document.getElementById('welcome');
-        const sessionLabel = document.getElementById('session-label');
-        const apiKeyInput = document.getElementById('api-key-input');
-        const keyStatus = document.getElementById('key-status');
-        const keyIndicator = document.getElementById('key-indicator');
-        const modelSelect = document.getElementById('model-select');
+// --- Navigation ---
+function showView(name) {
+    document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
+    document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
+    $('view-' + name).classList.add('active');
+    event.currentTarget.classList.add('active');
+    if (name !== 'chat') refreshDashboard();
+}
 
-        // --- Settings ---
-        function getApiKey() { return localStorage.getItem('rc_api_key') || ''; }
-        function getModel() { return localStorage.getItem('rc_model') || 'claude-sonnet-4-6'; }
+// --- Settings ---
+function getApiKey() { return localStorage.getItem('rc_api_key') || ''; }
+function getModel() { return localStorage.getItem('rc_model') || 'claude-sonnet-4-6'; }
+function saveApiKey() { const k = $('api-key-input').value.trim(); k ? localStorage.setItem('rc_api_key', k) : localStorage.removeItem('rc_api_key'); updateKeyStatus(); }
+function saveModel() { localStorage.setItem('rc_model', $('model-select').value); }
+function openSettings() { $('settings-modal').classList.add('open'); }
+function closeSettings() { $('settings-modal').classList.remove('open'); }
+function updateKeyStatus() {
+    const k = getApiKey(), el = $('key-status');
+    if (k) { el.textContent = 'Using your key (***' + k.slice(-4) + ')'; el.className = 'key-status set'; }
+    else if (window._serverKey) { el.textContent = 'Using server key'; el.className = 'key-status set'; }
+    else { el.textContent = 'No API key. Enter your key above.'; el.className = 'key-status unset'; }
+}
+$('api-key-input').value = getApiKey();
+$('model-select').value = getModel();
+$('settings-modal').addEventListener('click', e => { if (e.target === $('settings-modal')) closeSettings(); });
 
-        function saveApiKey() {
-            const key = apiKeyInput.value.trim();
-            if (key) {
-                localStorage.setItem('rc_api_key', key);
-            } else {
-                localStorage.removeItem('rc_api_key');
-            }
-            updateKeyStatus();
-        }
+// --- Chat ---
+const messagesEl = $('chat-messages'), inputEl = $('user-input'), sendBtn = $('send-btn');
+inputEl.addEventListener('input', () => { inputEl.style.height = 'auto'; inputEl.style.height = Math.min(inputEl.scrollHeight, 150) + 'px'; });
+inputEl.addEventListener('keydown', e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(); } });
+function sendSuggestion(el) { inputEl.value = el.textContent; sendMessage(); }
 
-        function saveModel() {
-            localStorage.setItem('rc_model', modelSelect.value);
-        }
-
-        function updateKeyStatus() {
-            const key = getApiKey();
-            const hasServerKey = window._serverHasKey || false;
-            if (key) {
-                keyStatus.textContent = 'Using your API key (sk-ant-...' + key.slice(-4) + ')';
-                keyStatus.className = 'key-status set';
-                keyIndicator.innerHTML = '<span class="dot"></span> Your key';
-            } else if (hasServerKey) {
-                keyStatus.textContent = 'Using server API key';
-                keyStatus.className = 'key-status set';
-                keyIndicator.innerHTML = '<span class="dot"></span> Server key';
-            } else {
-                keyStatus.textContent = 'No API key set. Enter your key above to get started.';
-                keyStatus.className = 'key-status unset';
-                keyIndicator.innerHTML = '<span class="dot" style="background:#ef4444"></span> No key';
-            }
-        }
-
-        function toggleSettings() {
-            document.getElementById('settings-panel').classList.toggle('open');
-        }
-
-        // Load saved settings
-        apiKeyInput.value = getApiKey();
-        modelSelect.value = getModel();
-
-        // Auto-resize textarea
-        inputEl.addEventListener('input', () => {
-            inputEl.style.height = 'auto';
-            inputEl.style.height = Math.min(inputEl.scrollHeight, 150) + 'px';
-        });
-
-        inputEl.addEventListener('keydown', (e) => {
-            if (e.key === 'Enter' && !e.shiftKey) {
-                e.preventDefault();
-                sendMessage();
-            }
-        });
-
-        function sendSuggestion(el) {
-            inputEl.value = el.textContent;
-            sendMessage();
-        }
-
-        async function sendMessage() {
-            const text = inputEl.value.trim();
-            if (!text || isStreaming) return;
-
-            if (welcomeEl) welcomeEl.remove();
-
-            // Add user message
-            addMessage('user', text);
-            inputEl.value = '';
-            inputEl.style.height = 'auto';
-
-            isStreaming = true;
-            sendBtn.disabled = true;
-
-            // Create assistant bubble
-            const assistantDiv = addMessage('assistant', '');
-            const bubble = assistantDiv.querySelector('.bubble');
-            let fullText = '';
-            let currentToolEl = null;
-
-            try {
-                const payload = { message: text, session_id: sessionId };
-                const key = getApiKey();
-                if (key) payload.api_key = key;
-
-                const response = await fetch('/api/chat', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify(payload),
-                });
-
-                const reader = response.body.getReader();
-                const decoder = new TextDecoder();
-                let buffer = '';
-
-                while (true) {
-                    const { done, value } = await reader.read();
-                    if (done) break;
-
-                    buffer += decoder.decode(value, { stream: true });
-                    const lines = buffer.split('\n');
-                    buffer = lines.pop() || '';
-
-                    for (const line of lines) {
-                        if (!line.startsWith('data: ')) continue;
-                        const data = JSON.parse(line.slice(6));
-
-                        switch (data.type) {
-                            case 'session':
-                                sessionId = data.session_id;
-                                sessionLabel.textContent = `Session: ${sessionId.slice(0, 8)}...`;
-                                break;
-
-                            case 'text_delta':
-                                if (currentToolEl) {
-                                    currentToolEl.remove();
-                                    currentToolEl = null;
-                                }
-                                fullText += data.text;
-                                bubble.innerHTML = marked.parse(fullText);
-                                scrollToBottom();
-                                break;
-
-                            case 'tool_start':
-                            case 'tool_executing':
-                                if (currentToolEl) currentToolEl.remove();
-                                currentToolEl = document.createElement('div');
-                                currentToolEl.className = 'tool-indicator';
-                                currentToolEl.innerHTML = `<div class="spinner"></div> Using <strong>${data.tool}</strong>...`;
-                                messagesEl.appendChild(currentToolEl);
-                                scrollToBottom();
-                                break;
-
-                            case 'tool_result':
-                                if (currentToolEl) {
-                                    currentToolEl.innerHTML = `&#x2705; <strong>${data.tool}</strong> completed`;
-                                    currentToolEl.style.borderColor = '#86efac';
-                                    setTimeout(() => {
-                                        if (currentToolEl) {
-                                            currentToolEl.style.opacity = '0.5';
-                                        }
-                                    }, 2000);
-                                    currentToolEl = null;
-                                }
-                                break;
-
-                            case 'done':
-                                if (data.usage) {
-                                    const cost = document.createElement('div');
-                                    cost.className = 'cost-badge';
-                                    const tokens = data.usage.input_tokens + data.usage.output_tokens;
-                                    cost.textContent = `${tokens.toLocaleString()} tokens`;
-                                    bubble.appendChild(cost);
-                                }
-                                break;
-
-                            case 'error':
-                                fullText += `\n\n**Error:** ${data.message}`;
-                                bubble.innerHTML = marked.parse(fullText);
-                                scrollToBottom();
-                                break;
-                        }
-                    }
+async function sendMessage() {
+    const text = inputEl.value.trim();
+    if (!text || isStreaming) return;
+    const w = $('welcome'); if (w) w.remove();
+    addMsg('user', text);
+    inputEl.value = ''; inputEl.style.height = 'auto';
+    isStreaming = true; sendBtn.disabled = true;
+    const aDiv = addMsg('assistant', ''), bubble = aDiv.querySelector('.bubble');
+    let fullText = '', toolEl = null;
+    try {
+        const payload = { message: text, session_id: sessionId, model: getModel() };
+        const k = getApiKey(); if (k) payload.api_key = k;
+        const res = await fetch('/api/chat', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(payload) });
+        const reader = res.body.getReader(), dec = new TextDecoder(); let buf = '';
+        while (true) {
+            const { done, value } = await reader.read(); if (done) break;
+            buf += dec.decode(value, {stream:true});
+            const lines = buf.split('\n'); buf = lines.pop() || '';
+            for (const line of lines) {
+                if (!line.startsWith('data: ')) continue;
+                const d = JSON.parse(line.slice(6));
+                switch(d.type) {
+                    case 'session': sessionId = d.session_id; break;
+                    case 'text_delta':
+                        if (toolEl) { toolEl.remove(); toolEl = null; }
+                        fullText += d.text; bubble.innerHTML = marked.parse(fullText); scrollChat(); break;
+                    case 'tool_start': case 'tool_executing':
+                        if (toolEl) toolEl.remove();
+                        toolEl = document.createElement('div'); toolEl.className = 'tool-indicator';
+                        toolEl.innerHTML = '<div class="spinner"></div> Using <strong>' + d.tool + '</strong>...';
+                        messagesEl.appendChild(toolEl); scrollChat(); break;
+                    case 'tool_result':
+                        if (toolEl) { toolEl.innerHTML = '&#x2705; <strong>' + d.tool + '</strong>'; toolEl = null; }
+                        refreshDashboard(); break;
+                    case 'done':
+                        if (d.usage) { const c = document.createElement('div'); c.className = 'cost-badge'; c.textContent = (d.usage.input_tokens+d.usage.output_tokens).toLocaleString()+' tokens'; bubble.appendChild(c); }
+                        refreshDashboard(); break;
+                    case 'error':
+                        fullText += '\n\n**Error:** ' + d.message; bubble.innerHTML = marked.parse(fullText); scrollChat(); break;
                 }
-            } catch (err) {
-                bubble.innerHTML = `<p style="color: #dc2626;">Error: ${err.message}</p>`;
             }
-
-            if (currentToolEl) currentToolEl.remove();
-            isStreaming = false;
-            sendBtn.disabled = false;
-            inputEl.focus();
         }
+    } catch(e) { bubble.innerHTML = '<p style="color:var(--red)">Error: '+esc(e.message)+'</p>'; }
+    if (toolEl) toolEl.remove();
+    isStreaming = false; sendBtn.disabled = false; inputEl.focus();
+}
 
-        function addMessage(role, content) {
-            const div = document.createElement('div');
-            div.className = `message ${role}`;
-            div.innerHTML = `<div class="bubble">${role === 'assistant' ? '' : escapeHtml(content)}</div>`;
-            messagesEl.appendChild(div);
-            scrollToBottom();
-            return div;
-        }
+function addMsg(role, text) {
+    const d = document.createElement('div'); d.className = 'message ' + role;
+    d.innerHTML = '<div class="bubble">' + (role==='assistant' ? '' : esc(text)) + '</div>';
+    messagesEl.appendChild(d); scrollChat(); return d;
+}
+function esc(t) { const d = document.createElement('div'); d.textContent = t; return d.innerHTML; }
+function scrollChat() { messagesEl.scrollTop = messagesEl.scrollHeight; }
 
-        function escapeHtml(text) {
-            const d = document.createElement('div');
-            d.textContent = text;
-            return d.innerHTML;
-        }
+// --- Dashboard refresh ---
+let expChart = null;
+async function refreshDashboard() {
+    try {
+        const [dash, exps, insights, papers, jobs] = await Promise.all([
+            fetch('/api/dashboard').then(r=>r.json()),
+            fetch('/api/experiments').then(r=>r.json()),
+            fetch('/api/insights').then(r=>r.json()),
+            fetch('/api/papers').then(r=>r.json()),
+            fetch('/api/jobs').then(r=>r.json()),
+        ]);
+        // Badge counts
+        $('exp-count').textContent = dash.experiments.total;
+        $('ins-count').textContent = dash.insights.total;
+        $('pap-count').textContent = dash.papers.total;
+        $('job-count').textContent = dash.jobs.total;
 
-        function scrollToBottom() {
-            messagesEl.scrollTop = messagesEl.scrollHeight;
-        }
+        // Experiments
+        $('exp-stats').innerHTML = statCard('Total', dash.experiments.total) + statCard('Completed', dash.experiments.by_status.completed||0, 'var(--green)') + statCard('Running', dash.experiments.by_status.running||0, 'var(--yellow)') + statCard('Failed', dash.experiments.by_status.failed||0, 'var(--red)');
+        renderExpTable(exps);
+        renderExpChart(dash.experiments.by_status);
 
-        // Health check on load
-        fetch('/api/health').then(r => r.json()).then(data => {
-            window._serverHasKey = data.api_key_set;
-            updateKeyStatus();
+        // Insights
+        $('ins-stats').innerHTML = statCard('Total', dash.insights.total) + Object.entries(dash.insights.by_category).map(([k,v]) => statCard(k, v)).join('');
+        renderInsights(insights);
 
-            if (!data.api_key_set && !getApiKey()) {
-                welcomeEl.querySelector('p').textContent =
-                    'To get started, click Settings and enter your Anthropic API key.';
-            }
-        });
-    </script>
+        // Papers
+        renderPapers(papers);
+
+        // Jobs
+        $('job-stats').innerHTML = statCard('Total', dash.jobs.total) + statCard('Active', dash.jobs.active, 'var(--green)');
+        renderJobs(jobs);
+    } catch(e) { /* silent — dashboard updates are best-effort */ }
+}
+
+function statCard(label, value, color) {
+    return '<div class="stat-card"><div class="label">'+label+'</div><div class="value" style="color:'+(color||'var(--text)')+'">'+value+'</div></div>';
+}
+
+function renderExpTable(exps) {
+    const tb = $('exp-table-body');
+    if (!exps.length) { tb.innerHTML = '<tr><td colspan="5" class="empty">No experiments yet. Ask the copilot to design one!</td></tr>'; return; }
+    tb.innerHTML = exps.map(e => '<tr onclick="showExpDetail(\''+e.id+'\')" style="cursor:pointer"><td><strong>'+esc(e.name)+'</strong>'+(e.hypothesis?'<br><span style="font-size:12px;color:var(--text-secondary)">'+esc(e.hypothesis.slice(0,80))+'</span>':'')+'</td><td><span class="badge '+e.status+'">'+e.status+'</span></td><td>'+esc(e.dataset||'—')+'</td><td>'+esc(e.model_type||'—')+'</td><td style="font-size:12px;color:var(--text-secondary)">'+fmtDate(e.created_at)+'</td></tr>').join('');
+}
+
+function renderExpChart(byStatus) {
+    const ctx = $('exp-chart');
+    if (expChart) expChart.destroy();
+    const labels = Object.keys(byStatus), data = Object.values(byStatus);
+    if (!labels.length) return;
+    const colors = { planned:'#60a5fa', running:'#fbbf24', completed:'#4ade80', failed:'#f87171', cancelled:'#94a3b8' };
+    expChart = new Chart(ctx, { type:'doughnut', data:{ labels, datasets:[{ data, backgroundColor: labels.map(l=>colors[l]||'#94a3b8') }] }, options:{ responsive:true, plugins:{ legend:{ position:'right' } } } });
+}
+
+function renderInsights(insights) {
+    const el = $('insights-list');
+    if (!insights.length) { el.innerHTML = '<div style="text-align:center;color:var(--text-muted);padding:40px">No insights yet. Ask the copilot to analyze experiments!</div>'; return; }
+    el.innerHTML = insights.map(i => '<div class="detail-panel"><div style="display:flex;justify-content:space-between;align-items:start"><h3>'+esc(i.title)+'</h3><span class="badge '+(i.category||'')+'">'+esc(i.category||'')+'</span></div><p style="margin-top:8px;font-size:14px;color:var(--text-secondary)">'+esc(i.content)+'</p>'+(i.confidence?'<div style="margin-top:8px;font-size:12px">Confidence: <strong>'+(i.confidence*100).toFixed(0)+'%</strong></div>':'')+(i.tags&&i.tags.length?'<div style="margin-top:8px">'+i.tags.map(t=>'<span class="tag">'+esc(t)+'</span>').join('')+'</div>':'')+'<div style="font-size:11px;color:var(--text-muted);margin-top:8px">'+fmtDate(i.created_at)+'</div></div>').join('');
+}
+
+function renderPapers(papers) {
+    const tb = $('papers-table-body');
+    if (!papers.length) { tb.innerHTML = '<tr><td colspan="4" class="empty">No papers saved yet. Ask the copilot to search for papers!</td></tr>'; return; }
+    tb.innerHTML = papers.map(p => '<tr><td><strong>'+esc(p.title)+'</strong>'+(p.arxiv_id?'<br><span style="font-size:12px;color:var(--text-secondary)">arXiv: '+esc(p.arxiv_id)+'</span>':'')+(p.relevance_notes?'<br><span style="font-size:12px;color:var(--text-muted)">'+esc(p.relevance_notes.slice(0,100))+'</span>':'')+'</td><td style="font-size:13px">'+esc((p.authors||[]).slice(0,3).join(', '))+(p.authors&&p.authors.length>3?' +more':'')+'</td><td>'+(p.year||'—')+'</td><td>'+(p.tags||[]).map(t=>'<span class="tag">'+esc(t)+'</span>').join('')+'</td></tr>').join('');
+}
+
+function renderJobs(jobs) {
+    const tb = $('jobs-table-body');
+    if (!jobs.length) { tb.innerHTML = '<tr><td colspan="5" class="empty">No jobs submitted yet.</td></tr>'; return; }
+    tb.innerHTML = jobs.map(j => '<tr><td style="font-family:monospace;font-size:13px">'+esc(j.job_id)+'</td><td>'+esc(j.name)+'</td><td><span class="badge '+j.status.toLowerCase()+'">'+j.status+'</span></td><td>'+j.gpus+'</td><td style="font-size:12px;color:var(--text-secondary)">'+fmtDate(j.submitted_at)+'</td></tr>').join('');
+}
+
+async function showExpDetail(id) {
+    const exp = await fetch('/api/experiments/'+id).then(r=>r.json());
+    if (exp.error) return;
+    const el = $('exp-stats').parentElement;
+    const detail = document.createElement('div');
+    detail.className = 'detail-panel';
+    detail.innerHTML = '<div style="display:flex;justify-content:space-between"><h3>'+esc(exp.name)+'</h3><button onclick="this.parentElement.parentElement.remove()" style="border:none;background:none;font-size:18px;cursor:pointer">&times;</button></div>'
+        +(exp.hypothesis?'<div class="field"><div class="field-label">Hypothesis</div><div class="field-value">'+esc(exp.hypothesis)+'</div></div>':'')
+        +(exp.description?'<div class="field"><div class="field-label">Description</div><div class="field-value">'+esc(exp.description)+'</div></div>':'')
+        +(exp.config&&Object.keys(exp.config).length?'<div class="field"><div class="field-label">Config</div><pre>'+esc(JSON.stringify(exp.config,null,2))+'</pre></div>':'')
+        +(exp.results&&Object.keys(exp.results).length?'<div class="field"><div class="field-label">Results</div><pre>'+esc(JSON.stringify(exp.results,null,2))+'</pre></div>':'')
+        +(exp.tags&&exp.tags.length?'<div class="field"><div class="field-label">Tags</div><div>'+exp.tags.map(t=>'<span class="tag">'+esc(t)+'</span>').join('')+'</div></div>':'');
+    el.insertBefore(detail, el.children[1]);
+}
+
+function fmtDate(iso) { if (!iso) return '—'; try { return new Date(iso).toLocaleDateString('en-GB',{day:'numeric',month:'short',year:'numeric'}); } catch { return iso; } }
+
+// --- Init ---
+fetch('/api/health').then(r=>r.json()).then(d => { window._serverKey = d.api_key_set; updateKeyStatus(); if (!d.api_key_set && !getApiKey()) { const w=$('welcome'); if(w) w.querySelector('p').textContent='Click Settings to enter your Anthropic API key.'; } });
+refreshDashboard();
+</script>
 </body>
 </html>

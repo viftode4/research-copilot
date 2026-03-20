@@ -64,10 +64,11 @@ class CopilotConfig(BaseSettings):
 
     model_config = {"env_prefix": "RC_"}
 
-    model: str = "claude-opus-4-6"
+    model: str = "claude-sonnet-4-6"
     max_budget_usd: float = 5.0
     max_turns: int = 50
     working_dir: str = "."
+    api_base_url: str = ""  # LLM proxy URL (e.g. http://localhost:4000 for LiteLLM)
 
     db: DatabaseConfig = Field(default_factory=DatabaseConfig)
     wandb: WandbConfig = Field(default_factory=WandbConfig)
