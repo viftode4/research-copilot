@@ -51,6 +51,8 @@ config = load_config()
 class ChatRequest(BaseModel):
     message: str
     session_id: str | None = None
+    api_key: str | None = None  # BYOK: user provides their own key
+    model: str | None = None  # Override model per request
 
 
 class SessionInfo(BaseModel):
@@ -63,7 +65,10 @@ class SessionInfo(BaseModel):
 # ---------------------------------------------------------------------------
 
 
-def _get_client() -> anthropic.Anthropic:
+def _get_client(api_key: str | None = None) -> anthropic.Anthropic:
+    """Create Anthropic client. Uses provided key (BYOK) or falls back to env var."""
+    if api_key:
+        return anthropic.Anthropic(api_key=api_key)
     return anthropic.Anthropic()
 
 
@@ -71,14 +76,16 @@ async def _run_tool_loop(
     client: anthropic.Anthropic,
     messages: list[dict[str, Any]],
     tools: list[dict[str, Any]],
+    model: str | None = None,
 ) -> Any:
     """Run the agentic tool use loop. Yields SSE events as the model responds."""
     max_iterations = 15
+    use_model = model or config.model
 
     for _ in range(max_iterations):
         # Stream the response
         with client.messages.stream(
-            model=config.model,
+            model=use_model,
             max_tokens=16000,
             system=DOMAIN_SYSTEM_PROMPT,
             messages=messages,
@@ -190,13 +197,20 @@ async def chat(request: ChatRequest):
     messages.append({"role": "user", "content": request.message})
 
     tools = get_tool_schemas()
-    client = _get_client()
+    client = _get_client(api_key=request.api_key)
 
     async def event_stream():
         yield f"data: {json.dumps({'type': 'session', 'session_id': session_id})}\n\n"
 
-        async for event in _run_tool_loop(client, messages, tools):
-            yield f"data: {json.dumps(event, default=str)}\n\n"
+        try:
+            async for event in _run_tool_loop(client, messages, tools, model=request.model):
+                yield f"data: {json.dumps(event, default=str)}\n\n"
+        except anthropic.AuthenticationError:
+            yield f"data: {json.dumps({'type': 'error', 'message': 'Invalid API key. Check your key in Settings.'})}\n\n"
+        except anthropic.RateLimitError:
+            yield f"data: {json.dumps({'type': 'error', 'message': 'Rate limited. Wait a moment and try again.'})}\n\n"
+        except anthropic.APIError as e:
+            yield f"data: {json.dumps({'type': 'error', 'message': f'API error: {e.message}'})}\n\n"
 
     return StreamingResponse(
         event_stream(),
