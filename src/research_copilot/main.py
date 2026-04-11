@@ -2,19 +2,15 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
 import os
 
 import click
 
 from research_copilot.config import load_config
-from research_copilot.services.workflows import (
-    launch_experiment as launch_experiment_workflow,
-    monitor_run as monitor_run_workflow,
-    research_context as research_context_workflow,
-    review_results as review_results_workflow,
-    triage as triage_workflow,
+from research_copilot.services.ultrawork import (
+    build_ultrawork_run_plan,
+    list_ultrawork_profiles,
 )
 from research_copilot.tui import launch_tui
 from research_copilot.tui.adapters import build_dashboard_snapshot
@@ -274,6 +270,66 @@ def init_db():
     click.echo("Run:")
     click.echo(f"  createdb {config.db.name}")
     click.echo(f"  psql -d {config.db.name} -f {migration_path}")
+
+
+@cli.group()
+def ultrawork():
+    """Agent-safe ultrawork profile registry and execution contracts."""
+
+
+@ultrawork.group(name="profile")
+def ultrawork_profile():
+    """Inspect registered ultrawork profiles."""
+
+
+@ultrawork_profile.command(name="list")
+@click.option("--json", "as_json", is_flag=True, help="Emit machine-readable JSON output.")
+def ultrawork_profile_list(as_json: bool):
+    """List approved ultrawork profiles."""
+    profiles = [profile.as_dict() for profile in list_ultrawork_profiles()]
+
+    if as_json:
+        click.echo(json.dumps({"profiles": profiles}, indent=2))
+        return
+
+    for profile in profiles:
+        click.echo(profile["name"])
+        click.echo(f"  Summary: {profile['summary']}")
+        click.echo(f"  When:    {profile['when_to_use']}")
+        click.echo("  Lanes:")
+        for lane in profile["lanes"]:
+            click.echo(f"    - {lane['name']}: {lane['focus']}")
+        click.echo(f"  Output:  {', '.join(profile['expected_output'])}")
+        click.echo()
+
+
+@ultrawork.command(name="run")
+@click.argument("profile_name")
+@click.option("--goal", default="", help="Optional operator goal to attach to the run contract.")
+@click.option("--json", "as_json", is_flag=True, help="Emit machine-readable JSON output.")
+def ultrawork_run(profile_name: str, goal: str, as_json: bool):
+    """Emit the execution contract for a named ultrawork profile."""
+    try:
+        contract = build_ultrawork_run_plan(profile_name, goal=goal)
+    except KeyError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    if as_json:
+        click.echo(json.dumps(contract, indent=2))
+        return
+
+    profile = contract["profile"]
+    click.echo(f"Profile: {profile['name']}")
+    click.echo(f"Summary: {profile['summary']}")
+    if contract["goal"]:
+        click.echo(f"Goal:    {contract['goal']}")
+    click.echo("Lanes:")
+    for lane in profile["lanes"]:
+        click.echo(f"  - {lane['name']}: {lane['focus']}")
+    click.echo(f"Output:  {', '.join(profile['expected_output'])}")
+    click.echo("Notes:")
+    for note in contract["notes"]:
+        click.echo(f"  - {note}")
 
 
 if __name__ == "__main__":

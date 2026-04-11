@@ -79,41 +79,35 @@ def test_status_and_help_reflect_terminal_first_surface():
     assert help_result.exit_code == 0
     assert "serve" not in help_result.output
     assert "tui" in help_result.output
+    assert "ultrawork" in help_result.output
 
 
-def test_workflow_help_lists_named_commands():
+def test_ultrawork_profile_list_json_emits_registry():
     runner = CliRunner()
 
-    result = runner.invoke(cli, ["workflow", "--help"])
+    result = runner.invoke(cli, ["ultrawork", "profile", "list", "--json"])
 
     assert result.exit_code == 0
-    assert "triage" in result.output
-    assert "launch-experiment" in result.output
-    assert "monitor-run" in result.output
-    assert "review-results" in result.output
-    assert "research-context" in result.output
+    payload = json.loads(result.output)
+    assert [profile["name"] for profile in payload["profiles"]] == [
+        "ops-triage",
+        "experiment-launch",
+        "run-review",
+        "literature-context",
+        "incident-recovery",
+    ]
 
 
-def test_launch_experiment_command_emits_json_and_updates_state():
+def test_ultrawork_run_json_emits_selected_contract():
     runner = CliRunner()
 
     result = runner.invoke(
         cli,
-        [
-            "workflow",
-            "launch-experiment",
-            "--name",
-            "CLI launch",
-            "--script",
-            "#!/bin/bash\npython train.py",
-            "--hypothesis",
-            "CLI flow works",
-            "--json",
-        ],
+        ["ultrawork", "run", "incident-recovery", "--goal", "restore failed job", "--json"],
     )
 
     assert result.exit_code == 0
     payload = json.loads(result.output)
-    assert payload["workflow"] == "launch-experiment"
-    assert payload["experiment"]["name"] == "CLI launch"
-    assert payload["job"]["job_id"] in _mock_jobs
+    assert payload["profile"]["name"] == "incident-recovery"
+    assert payload["goal"] == "restore failed job"
+    assert payload["lane_count"] == 3

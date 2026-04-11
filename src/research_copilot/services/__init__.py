@@ -11,6 +11,13 @@ from research_copilot.services.research_ops import (
     ResearchOpsService,
     ResearchOpsState,
 )
+from research_copilot.services.ultrawork import (
+    UltraworkLane,
+    UltraworkProfile,
+    build_ultrawork_run_plan,
+    get_ultrawork_profile,
+    list_ultrawork_profiles,
+)
 
 __all__ = [
     "ACTIVE_EXPERIMENT_STATUSES",
@@ -22,5 +29,10 @@ __all__ = [
     "PaperState",
     "ResearchOpsService",
     "ResearchOpsState",
+    "UltraworkLane",
+    "UltraworkProfile",
+    "build_ultrawork_run_plan",
+    "get_ultrawork_profile",
+    "list_ultrawork_profiles",
 ]
 
