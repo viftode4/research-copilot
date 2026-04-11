@@ -10,6 +10,7 @@ from typing import Any
 import click
 
 from research_copilot.config import load_config
+from research_copilot.research_state import load_onboarding_contract
 from research_copilot.services.research_ops import (
     add_insight as add_insight_service,
     cancel_job as cancel_job_service,
@@ -83,6 +84,7 @@ def status():
     """Show the current configuration and connection status."""
     config = load_config()
     snapshot = build_dashboard_snapshot()
+    onboarding = load_onboarding_contract()
 
     click.echo("Research Copilot Configuration")
     click.echo("=" * 40)
@@ -106,6 +108,16 @@ def status():
     click.echo(f"  Experiments:       {len(snapshot.experiments)}")
     click.echo(f"  Saved papers:      {len(snapshot.papers)}")
     click.echo(f"  Stored insights:   {len(snapshot.insights)}")
+    click.echo()
+    click.echo("Onboarding:")
+    if onboarding:
+        click.echo("  State:            Configured")
+        click.echo(f"  Goal:             {onboarding.get('goal', 'Unknown')}")
+        click.echo(f"  Active profile:   {onboarding.get('active_profile', 'Unknown')}")
+        click.echo("  Next step:        research-copilot workflow triage")
+    else:
+        click.echo("  State:            Not configured")
+        click.echo("  Next step:        research-copilot workflow onboard")
     click.echo()
     click.echo("Run 'research-copilot' or 'research-copilot tui' to open the terminal dashboard.")
 
