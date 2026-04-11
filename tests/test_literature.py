@@ -9,9 +9,9 @@ import pytest
 
 from research_copilot.mcp_servers.literature import (
     _parse_arxiv_entry,
-    handle_search_papers,
-    handle_get_paper_details,
     handle_find_related_papers,
+    handle_get_paper_details,
+    handle_search_papers,
 )
 
 
@@ -207,3 +207,39 @@ class TestPaperDetails:
             # Verify the API was called with ARXIV: prefix
             call_url = client.get.call_args[0][0]
             assert "ARXIV:2301.12345" in call_url
+
+
+class TestRelatedPapers:
+    @pytest.mark.asyncio
+    async def test_find_related_papers(self):
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {
+            "recommendedPapers": [
+                {
+                    "paperId": "rel1",
+                    "title": "Follow-up Study",
+                    "authors": [{"name": "Ada Lovelace"}],
+                    "abstract": "A strong follow-up.",
+                    "year": 2025,
+                    "citationCount": 7,
+                    "venue": "ICLR",
+                    "externalIds": {"ArXiv": "2501.00001"},
+                    "url": "https://semanticscholar.org/paper/rel1",
+                }
+            ]
+        }
+        mock_response.raise_for_status = MagicMock()
+
+        with patch("research_copilot.mcp_servers.literature._get_client") as mock_client:
+            client = AsyncMock()
+            client.get = AsyncMock(return_value=mock_response)
+            mock_client.return_value = client
+
+            result = await handle_find_related_papers({"paper_id": "2301.12345", "max_results": 3})
+
+        content = json.loads(result["content"][0]["text"])
+        assert content["total"] == 1
+        assert content["papers"][0]["title"] == "Follow-up Study"
+        call_url = client.get.call_args[0][0]
+        assert "ARXIV:2301.12345" in call_url
