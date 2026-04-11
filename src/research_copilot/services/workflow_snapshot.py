@@ -6,7 +6,11 @@ from collections.abc import Mapping, Sequence
 from typing import Any
 
 from research_copilot.mcp_servers.slurm import MockJob
-from research_copilot.services.research_ops import JobState, ResearchOpsService
+from research_copilot.services.research_ops import (
+    ACTIVE_EXPERIMENT_STATUSES,
+    JobState,
+    ResearchOpsService,
+)
 
 
 def _truncate_log(text: str, *, max_lines: int, max_chars: int) -> str:
