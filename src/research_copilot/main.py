@@ -51,7 +51,19 @@ from research_copilot.tui import launch_tui
 from research_copilot.tui.adapters import build_dashboard_snapshot
 
 
-@click.group(invoke_without_command=True)
+CLI_EPILOG = """
+Start with: research-copilot workflow onboard
+Solo proof: docs/seeded-solo-cli-scenario.md
+"""
+
+WORKFLOW_EPILOG = """
+Start with: research-copilot workflow onboard
+Then: research-copilot workflow triage --json
+Solo proof: docs/seeded-solo-cli-scenario.md
+"""
+
+
+@click.group(invoke_without_command=True, epilog=CLI_EPILOG.strip())
 @click.version_option(version="0.1.0")
 @click.pass_context
 def cli(ctx: click.Context):
@@ -526,9 +538,9 @@ def papers_list(limit: int, as_json: bool):
     _emit_result(payload, as_json, f"Listed {payload['total']} paper(s).")
 
 
-@cli.group()
+@cli.group(epilog=WORKFLOW_EPILOG.strip())
 def workflow():
-    """Run named research workflow commands."""
+    """Run named research workflow commands for the solo research loop."""
 
 
 @workflow.command()

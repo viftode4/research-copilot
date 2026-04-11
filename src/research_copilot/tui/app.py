@@ -171,6 +171,10 @@ class ResearchCopilotTUI:
                 name="experiments",
             ),
         )
+        if not self.snapshot.jobs and not self.snapshot.experiments:
+            layout["bottom"].update(Panel(self._render_getting_started(), title="Getting started"))
+            return layout
+
         layout["bottom"].split_row(
             Layout(
                 Panel(self._render_job_detail(self._selected_job()), title="Selected job"),
@@ -368,6 +372,16 @@ class ResearchCopilotTUI:
         return Panel(
             Text(f"{COMMAND_HINT} • focus: {selected}", style="bold cyan"),
             border_style="cyan",
+        )
+
+    def _render_getting_started(self) -> RenderableType:
+        return Group(
+            Text("Use the solo workflow commands to seed the dashboard:", style="bold"),
+            Text("  1. research-copilot workflow onboard"),
+            Text("  2. research-copilot workflow triage --json"),
+            Text("  3. research-copilot workflow run-experiment --command \"python ...\" --json"),
+            Text("  4. research-copilot workflow review-results <experiment-id> --json"),
+            Text("Proof script: docs/seeded-solo-cli-scenario.md", style="dim"),
         )
 
     def _selected_job(self) -> JobRecord | None:
