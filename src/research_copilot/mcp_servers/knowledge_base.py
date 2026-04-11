@@ -17,7 +17,6 @@ from uuid import uuid4
 from research_copilot.research_state import (
     FileBackedCollection,
     SCHEMA_VERSION,
-    apply_storage_contract,
     build_provenance,
     save_record,
 )

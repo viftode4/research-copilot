@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import re
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -22,6 +23,22 @@ CANONICAL_DIRECTORIES = (
     "insights",
 )
 FILE_BACKED_FAMILIES = frozenset({"experiments", "insights", "papers", "context"})
+
+
+@dataclass(frozen=True)
+class ResearchStatePaths:
+    """Typed path bundle for the canonical research state layout."""
+
+    root: Path
+    goals: Path
+    experiments: Path
+    runs: Path
+    reviews: Path
+    notes: Path
+    papers: Path
+    context: Path
+    profiles: Path
+    insights: Path
 
 
 def utc_now_iso() -> str:
@@ -44,6 +61,23 @@ def ensure_research_root() -> Path:
     for directory in CANONICAL_DIRECTORIES:
         (root / directory).mkdir(parents=True, exist_ok=True)
     return root
+
+
+def get_research_state_paths() -> ResearchStatePaths:
+    """Return typed canonical paths for the file-backed state layout."""
+    root = ensure_research_root()
+    return ResearchStatePaths(
+        root=root,
+        goals=root / "goals",
+        experiments=root / "experiments",
+        runs=root / "runs",
+        reviews=root / "reviews",
+        notes=root / "notes",
+        papers=root / "papers",
+        context=root / "context",
+        profiles=root / "profiles",
+        insights=root / "insights",
+    )
 
 
 def build_provenance(

@@ -33,6 +33,11 @@ def clean_state():
     _store["papers"].clear()
     _store["context"].clear()
     yield
+    _mock_jobs.clear()
+    _store["experiments"].clear()
+    _store["insights"].clear()
+    _store["papers"].clear()
+    _store["context"].clear()
 
 
 class TestWorkflowSnapshot:

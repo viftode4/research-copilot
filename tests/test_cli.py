@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 
+import pytest
 from click.testing import CliRunner
 
 from research_copilot.main import cli
@@ -11,7 +12,12 @@ from research_copilot.mcp_servers.knowledge_base import _store
 from research_copilot.mcp_servers.slurm import MockJob, _mock_jobs
 
 
-def setup_function() -> None:
+@pytest.fixture(autouse=True)
+def clean_state() -> None:
+    _mock_jobs.clear()
+    for key in _store:
+        _store[key].clear()
+    yield
     _mock_jobs.clear()
     for key in _store:
         _store[key].clear()
