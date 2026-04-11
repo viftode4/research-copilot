@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import json
-from typing import Any
+from collections import Counter
+from dataclasses import dataclass
+from datetime import datetime
+from typing import Any, Mapping, Sequence
 
 from research_copilot.mcp_servers.knowledge_base import (
     _store,
@@ -19,12 +22,92 @@ from research_copilot.mcp_servers.knowledge_base import (
 )
 from research_copilot.mcp_servers.literature import handle_search_papers
 from research_copilot.mcp_servers.slurm import (
+    MockJob,
     _mock_jobs,
     handle_cancel_job,
     handle_get_job_logs,
     handle_submit_job,
 )
-from research_copilot.services.workflow_snapshot import build_workflow_snapshot
+
+ACTIVE_JOB_STATUSES = frozenset({"PENDING", "RUNNING"})
+ACTIVE_EXPERIMENT_STATUSES = frozenset({"planned", "queued", "running"})
+
+
+@dataclass(frozen=True)
+class JobState:
+    job_id: str
+    name: str
+    status: str
+    partition: str
+    gpus: int
+    submitted_at: str
+    started_at: str | None
+    completed_at: str | None
+    time_limit: str
+    stdout: str
+    stderr: str
+    workflow_name: str = ""
+    experiment_id: str = ""
+    submitted_by: str = ""
+
+
+@dataclass(frozen=True)
+class ExperimentState:
+    experiment_id: str
+    name: str
+    status: str
+    hypothesis: str
+    description: str
+    dataset: str
+    model_type: str
+    tags: tuple[str, ...]
+    created_at: str
+    updated_at: str
+    results: dict[str, Any]
+    linked_job_id: str | None
+    linked_job_status: str | None
+    is_active: bool
+
+
+@dataclass(frozen=True)
+class InsightState:
+    insight_id: str
+    title: str
+    category: str
+    confidence: str
+    content: str
+    created_at: str
+
+
+@dataclass(frozen=True)
+class PaperState:
+    paper_id: str
+    title: str
+    authors: tuple[str, ...]
+    year: str
+    relevance_notes: str
+    tags: tuple[str, ...]
+    added_at: str
+
+
+@dataclass(frozen=True)
+class ContextState:
+    context_id: str
+    key: str
+    context_type: str
+    value: str
+    updated_at: str
+
+
+@dataclass(frozen=True)
+class ResearchOpsState:
+    jobs: tuple[JobState, ...]
+    experiments: tuple[ExperimentState, ...]
+    insights: tuple[InsightState, ...]
+    papers: tuple[PaperState, ...]
+    context_entries: tuple[ContextState, ...]
+    experiment_status_counts: dict[str, int]
+
 
 
 def _decode_response(response: dict[str, Any]) -> Any:
@@ -38,15 +121,257 @@ def _decode_response(response: dict[str, Any]) -> Any:
         return {"message": text}
 
 
+
+def _parse_timestamp(value: str) -> datetime | None:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+
+def _job_sort_key(job: JobState) -> tuple[int, str]:
+    parsed = _parse_timestamp(job.submitted_at)
+    return (int(parsed.timestamp()) if parsed else 0, job.job_id)
+
+
+
+def _experiment_sort_key(experiment: Mapping[str, Any]) -> tuple[int, str]:
+    updated = _parse_timestamp(experiment.get("updated_at", "") or experiment.get("created_at", ""))
+    return (int(updated.timestamp()) if updated else 0, str(experiment.get("id", "")))
+
+
+class ResearchOpsService:
+    """Read-mostly service boundary over current in-memory stores."""
+
+    def __init__(
+        self,
+        *,
+        store: Mapping[str, Sequence[Mapping[str, Any]]] | None = None,
+        jobs: Mapping[str, MockJob] | None = None,
+    ) -> None:
+        self._store = store or _store
+        self._jobs = jobs or _mock_jobs
+
+    def list_jobs(self, *, limit: int = 20, status_filter: str = "") -> tuple[JobState, ...]:
+        job_states = [
+            JobState(
+                job_id=job.job_id,
+                name=job.name,
+                status=job.status,
+                partition=job.partition,
+                gpus=job.gpus,
+                submitted_at=job.submitted_at,
+                started_at=job.started_at,
+                completed_at=job.completed_at,
+                time_limit=job.time_limit,
+                stdout=job.output,
+                stderr=job.error,
+                workflow_name=job.workflow_name,
+                experiment_id=job.experiment_id,
+                submitted_by=job.submitted_by,
+            )
+            for job in self._jobs.values()
+            if not status_filter or job.status == status_filter.upper()
+        ]
+        job_states.sort(key=_job_sort_key, reverse=True)
+        return tuple(job_states[:limit])
+
+    def get_job(self, job_id: str) -> JobState:
+        job = self._jobs.get(job_id)
+        if not job:
+            raise ValueError(f"Job {job_id} not found")
+        return JobState(
+            job_id=job.job_id,
+            name=job.name,
+            status=job.status,
+            partition=job.partition,
+            gpus=job.gpus,
+            submitted_at=job.submitted_at,
+            started_at=job.started_at,
+            completed_at=job.completed_at,
+            time_limit=job.time_limit,
+            stdout=job.output,
+            stderr=job.error,
+            workflow_name=job.workflow_name,
+            experiment_id=job.experiment_id,
+            submitted_by=job.submitted_by,
+        )
+
+    def list_experiments(self, *, limit: int = 20) -> tuple[ExperimentState, ...]:
+        raw_experiments = sorted(self._store.get("experiments", []), key=_experiment_sort_key, reverse=True)
+        items: list[ExperimentState] = []
+        for experiment in raw_experiments[:limit]:
+            linked_job_id = str(experiment.get("slurm_job_id") or "") or None
+            linked_job = self._jobs.get(linked_job_id or "")
+            items.append(
+                ExperimentState(
+                    experiment_id=str(experiment.get("id", "")),
+                    name=str(experiment.get("name", "")),
+                    status=str(experiment.get("status", "unknown")),
+                    hypothesis=str(experiment.get("hypothesis", "")),
+                    description=str(experiment.get("description", "")),
+                    dataset=str(experiment.get("dataset", "")),
+                    model_type=str(experiment.get("model_type", "")),
+                    tags=tuple(experiment.get("tags", [])),
+                    created_at=str(experiment.get("created_at", "")),
+                    updated_at=str(experiment.get("updated_at", experiment.get("created_at", ""))),
+                    results=dict(experiment.get("results", {}) or {}),
+                    linked_job_id=linked_job_id,
+                    linked_job_status=linked_job.status if linked_job else None,
+                    is_active=str(experiment.get("status", "")).lower() in ACTIVE_EXPERIMENT_STATUSES,
+                )
+            )
+        return tuple(items)
+
+    def snapshot(
+        self,
+        *,
+        job_limit: int = 20,
+        experiment_limit: int = 20,
+        insight_limit: int = 10,
+        paper_limit: int = 10,
+        context_limit: int = 10,
+    ) -> ResearchOpsState:
+        experiments = self.list_experiments(limit=experiment_limit)
+        insights = tuple(
+            InsightState(
+                insight_id=str(insight.get("id", "")),
+                title=str(insight.get("title", "")),
+                category=str(insight.get("category", "observation")),
+                confidence=(
+                    f"{insight['confidence']:.2f}"
+                    if isinstance(insight.get("confidence"), float)
+                    else "—"
+                ),
+                content=str(insight.get("content", "")),
+                created_at=str(insight.get("created_at", "")),
+            )
+            for insight in list(self._store.get("insights", []))[-insight_limit:][::-1]
+        )
+        papers = tuple(
+            PaperState(
+                paper_id=str(paper.get("id", "")),
+                title=str(paper.get("title", "")),
+                authors=tuple(paper.get("authors", [])),
+                year=str(paper.get("year") or "—"),
+                relevance_notes=str(paper.get("relevance_notes", "")),
+                tags=tuple(paper.get("tags", [])),
+                added_at=str(paper.get("added_at", "")),
+            )
+            for paper in list(self._store.get("papers", []))[-paper_limit:][::-1]
+        )
+        context_entries = tuple(
+            ContextState(
+                context_id=str(entry.get("id", "")),
+                key=str(entry.get("key", "")),
+                context_type=str(entry.get("context_type", "note")),
+                value=str(entry.get("value", "")),
+                updated_at=str(entry.get("updated_at", "")),
+            )
+            for entry in list(self._store.get("context", []))[-context_limit:][::-1]
+        )
+        status_counts = Counter(experiment.status for experiment in experiments)
+        return ResearchOpsState(
+            jobs=self.list_jobs(limit=job_limit),
+            experiments=experiments,
+            insights=insights,
+            papers=papers,
+            context_entries=context_entries,
+            experiment_status_counts=dict(status_counts),
+        )
+
+
+
+def _build_snapshot_payload(state: ResearchOpsState, *, max_items: int) -> dict[str, Any]:
+    return {
+        "jobs": {
+            "total": len(state.jobs),
+            "active": sum(1 for job in state.jobs if job.status in ACTIVE_JOB_STATUSES),
+            "items": [
+                {
+                    "job_id": job.job_id,
+                    "name": job.name,
+                    "status": job.status,
+                    "is_active": job.status in ACTIVE_JOB_STATUSES,
+                    "submitted_at": job.submitted_at,
+                    "started_at": job.started_at,
+                    "completed_at": job.completed_at,
+                    "partition": job.partition,
+                    "gpus": job.gpus,
+                    "time_limit": job.time_limit,
+                    "stdout_preview": job.stdout,
+                    "stderr_preview": job.stderr,
+                    "workflow_name": job.workflow_name,
+                    "experiment_id": job.experiment_id,
+                }
+                for job in state.jobs[:max_items]
+            ],
+        },
+        "experiments": {
+            "total": len(state.experiments),
+            "active": sum(1 for experiment in state.experiments if experiment.is_active),
+            "by_status": state.experiment_status_counts,
+            "items": [
+                {
+                    "id": experiment.experiment_id,
+                    "name": experiment.name,
+                    "status": experiment.status,
+                    "is_active": experiment.is_active,
+                    "hypothesis": experiment.hypothesis,
+                    "dataset": experiment.dataset,
+                    "model_type": experiment.model_type,
+                    "tags": list(experiment.tags),
+                    "result_keys": sorted(experiment.results.keys()),
+                    "has_results": bool(experiment.results),
+                    "linked_job_id": experiment.linked_job_id,
+                    "linked_job_status": experiment.linked_job_status,
+                    "updated_at": experiment.updated_at,
+                    "created_at": experiment.created_at,
+                }
+                for experiment in state.experiments[:max_items]
+            ],
+        },
+        "knowledge": {
+            "insights_total": len(state.insights),
+            "papers_total": len(state.papers),
+            "context_total": len(state.context_entries),
+            "recent_papers": [
+                {
+                    "id": paper.paper_id,
+                    "title": paper.title,
+                    "year": paper.year,
+                    "tags": list(paper.tags),
+                }
+                for paper in state.papers[:max_items]
+            ],
+            "recent_context": [
+                {
+                    "id": entry.context_id,
+                    "key": entry.key,
+                    "context_type": entry.context_type,
+                    "value": entry.value,
+                }
+                for entry in state.context_entries[:max_items]
+            ],
+        },
+        "selection": {
+            "default_job_id": state.jobs[0].job_id if state.jobs else None,
+            "default_experiment_id": state.experiments[0].experiment_id if state.experiments else None,
+        },
+    }
+
+
 async def get_snapshot(*, max_items: int = 5) -> dict[str, Any]:
-    return build_workflow_snapshot(max_items=max_items)
+    service = ResearchOpsService()
+    return _build_snapshot_payload(service.snapshot(job_limit=max_items, experiment_limit=max_items), max_items=max_items)
 
 
 async def list_jobs(*, status_filter: str = "", limit: int = 20) -> dict[str, Any]:
-    jobs = list(_mock_jobs.values())
-    if status_filter:
-        jobs = [job for job in jobs if job.status == status_filter.upper()]
-    jobs = jobs[-limit:]
+    service = ResearchOpsService()
+    jobs = service.list_jobs(limit=limit, status_filter=status_filter)
     return {
         "total": len(jobs),
         "jobs": [
@@ -70,9 +395,7 @@ async def list_jobs(*, status_filter: str = "", limit: int = 20) -> dict[str, An
 
 
 async def get_job(*, job_id: str) -> dict[str, Any]:
-    job = _mock_jobs.get(job_id)
-    if not job:
-        raise ValueError(f"Job {job_id} not found")
+    job = ResearchOpsService().get_job(job_id)
     return {
         "job_id": job.job_id,
         "name": job.name,
@@ -86,8 +409,8 @@ async def get_job(*, job_id: str) -> dict[str, Any]:
         "workflow_name": job.workflow_name,
         "experiment_id": job.experiment_id,
         "submitted_by": job.submitted_by,
-        "output": job.output,
-        "error": job.error,
+        "output": job.stdout,
+        "error": job.stderr,
     }
 
 
@@ -248,7 +571,13 @@ async def set_context(
     )
 
 
-async def list_insights(*, category: str = "", tag: str = "", search_text: str = "", limit: int = 20) -> dict[str, Any]:
+async def list_insights(
+    *,
+    category: str = "",
+    tag: str = "",
+    search_text: str = "",
+    limit: int = 20,
+) -> dict[str, Any]:
     return _decode_response(
         await handle_query_insights(
             {
