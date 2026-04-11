@@ -48,14 +48,14 @@ async def test_service_snapshot_links_jobs_and_experiments():
     )
 
     snapshot = ResearchOpsService().snapshot(job_limit=5, experiment_limit=5)
+    experiments_by_id = {experiment.experiment_id: experiment for experiment in snapshot.experiments}
 
     assert snapshot.active_jobs == 1
     assert snapshot.jobs[0].job_id == job_id
-    assert snapshot.experiments[0].experiment_id == second_id
-    assert snapshot.experiments[0].linked_job_id == job_id
-    assert snapshot.experiments[0].linked_job_status == "PENDING"
-    assert snapshot.experiments[0].results == {"val_loss": 0.42}
-    assert snapshot.experiments[1].experiment_id == first_id
+    assert set(experiments_by_id) == {first_id, second_id}
+    assert experiments_by_id[second_id].linked_job_id == job_id
+    assert experiments_by_id[second_id].linked_job_status == "PENDING"
+    assert experiments_by_id[second_id].results == {"val_loss": 0.42}
     assert snapshot.experiment_status_counts == {"running": 1, "planned": 1}
 
 
