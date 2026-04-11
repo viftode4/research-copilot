@@ -17,7 +17,6 @@ from uuid import uuid4
 from research_copilot.research_state import (
     FileBackedCollection,
     SCHEMA_VERSION,
-    apply_storage_contract,
     build_provenance,
     save_record,
 )
@@ -40,13 +39,11 @@ def _now_iso() -> str:
 
 def _mutation_metadata(args: dict[str, Any]) -> dict[str, Any]:
     updated_at = _now_iso()
-    provenance = build_provenance(args, timestamp=updated_at)
     metadata = {
         "schema_version": SCHEMA_VERSION,
         "actor_type": args.get("actor_type", ""),
         "workflow_name": args.get("workflow_name", ""),
         "updated_at": updated_at,
-        "provenance": provenance,
     }
     if args.get("linked_experiment_id"):
         metadata["linked_experiment_id"] = args["linked_experiment_id"]

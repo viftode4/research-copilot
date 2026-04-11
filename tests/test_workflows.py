@@ -23,6 +23,9 @@ def clean_state():
     for key in _store:
         _store[key].clear()
     yield
+    _mock_jobs.clear()
+    for key in _store:
+        _store[key].clear()
 
 
 @pytest.mark.asyncio
