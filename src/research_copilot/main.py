@@ -32,13 +32,19 @@ from research_copilot.services.research_ops import (
 )
 from research_copilot.services.ultrawork import (
     build_ultrawork_run_plan,
+    execute_ultrawork_profile,
     list_ultrawork_profiles,
 )
 from research_copilot.services.workflows import (
     launch_experiment as launch_experiment_workflow,
     monitor_run as monitor_run_workflow,
+    onboard as onboard_workflow,
+    onboarding_summary as onboarding_summary_workflow,
+    overfitting_check as overfitting_check_workflow,
     research_context as research_context_workflow,
     review_results as review_results_workflow,
+    run_experiment as run_experiment_workflow,
+    next_step as next_step_workflow,
     triage as triage_workflow,
 )
 from research_copilot.tui import launch_tui
@@ -690,6 +696,194 @@ def research_context(
     _emit_result(payload, as_json, f"Found {payload['papers_total']} paper(s) for '{query}'.")
 
 
+@workflow.command("run-experiment")
+@click.option("--command", required=True, help="Local shell command to execute.")
+@click.option("--experiment-id", default="", help="Optional existing experiment id.")
+@click.option("--name", default="", help="Experiment name if creating a new one.")
+@click.option("--hypothesis", default="")
+@click.option("--description", default="")
+@click.option("--config", default="", help="JSON config string.")
+@click.option("--dataset", default="")
+@click.option("--model-type", default="")
+@click.option("--tag", "tags", multiple=True)
+@click.option("--created-by", default="human", show_default=True)
+@click.option("--actor-type", default="human", show_default=True)
+@click.option("--json", "as_json", is_flag=True, help="Emit machine-readable JSON.")
+def workflow_run_experiment(
+    command: str,
+    experiment_id: str,
+    name: str,
+    hypothesis: str,
+    description: str,
+    config: str,
+    dataset: str,
+    model_type: str,
+    tags: tuple[str, ...],
+    created_by: str,
+    actor_type: str,
+    as_json: bool,
+):
+    """Execute a real local experiment command and persist a run artifact."""
+    payload = _run_command(
+        run_experiment_workflow(
+            command=command,
+            experiment_id=experiment_id,
+            name=name,
+            hypothesis=hypothesis,
+            description=description,
+            config=config,
+            dataset=dataset,
+            model_type=model_type,
+            tags=list(tags),
+            created_by=created_by,
+            actor_type=actor_type,
+        )
+    )
+    _emit_result(
+        payload,
+        as_json,
+        f"Run {payload['run']['run_id']} finished with status {payload['run']['status']}.",
+    )
+
+
+@workflow.command("overfitting-check")
+@click.argument("experiment_id")
+@click.option("--train-key", default="train_loss", show_default=True)
+@click.option("--validation-key", default="val_loss", show_default=True)
+@click.option("--test-key", default="test_loss", show_default=True)
+@click.option("--json", "as_json", is_flag=True, help="Emit machine-readable JSON.")
+def workflow_overfitting_check(
+    experiment_id: str,
+    train_key: str,
+    validation_key: str,
+    test_key: str,
+    as_json: bool,
+):
+    """Inspect an experiment for simple overfitting signals."""
+    payload = _run_command(
+        overfitting_check_workflow(
+            experiment_id=experiment_id,
+            train_key=train_key,
+            validation_key=validation_key,
+            test_key=test_key,
+        )
+    )
+    _emit_result(payload, as_json, "; ".join(payload["review"]["diagnostics"]))
+
+
+@workflow.command("next-step")
+@click.argument("experiment_id")
+@click.option("--json", "as_json", is_flag=True, help="Emit machine-readable JSON.")
+def workflow_next_step(experiment_id: str, as_json: bool):
+    """Propose the next step after reviewing an experiment."""
+    payload = _run_command(next_step_workflow(experiment_id=experiment_id))
+    _emit_result(payload, as_json, "; ".join(payload["review"]["suggestions"]))
+
+
+def _prompt_csv(label: str, default: str = "") -> list[str]:
+    raw = click.prompt(label, default=default, show_default=bool(default))
+    return [item.strip() for item in raw.split(",") if item.strip()]
+
+
+@workflow.command("onboard")
+@click.option("--goal", default="", help="Current research goal.")
+@click.option("--success-criteria", default="", help="How success will be judged.")
+@click.option("--active-profile", default="", help="Preferred autonomous profile.")
+@click.option(
+    "--autonomy-level",
+    type=click.Choice(["guided", "bounded", "aggressive"], case_sensitive=False),
+    help="How much autonomy the tool may use inside workflows.",
+)
+@click.option("--allowed-action", "allowed_actions", multiple=True, help="Repeatable allowed action.")
+@click.option("--constraint", "constraints", multiple=True, help="Repeatable constraint.")
+@click.option("--stop-condition", "stop_conditions", multiple=True, help="Repeatable stop condition.")
+@click.option("--notes", default="", help="Free-form notes from the onboarding interview.")
+@click.option("--actor-type", default="human", show_default=True)
+@click.option("--json", "as_json", is_flag=True, help="Emit machine-readable JSON.")
+def workflow_onboard(
+    goal: str,
+    success_criteria: str,
+    active_profile: str,
+    autonomy_level: str | None,
+    allowed_actions: tuple[str, ...],
+    constraints: tuple[str, ...],
+    stop_conditions: tuple[str, ...],
+    notes: str,
+    actor_type: str,
+    as_json: bool,
+):
+    """Run the solo onboarding interview and persist the current research contract."""
+    if as_json:
+        missing = [
+            name
+            for name, value in (
+                ("goal", goal),
+                ("success_criteria", success_criteria),
+                ("active_profile", active_profile),
+                ("autonomy_level", autonomy_level),
+            )
+            if not value
+        ]
+        if missing:
+            raise click.ClickException(
+                "JSON mode requires explicit values for: " + ", ".join(missing)
+            )
+    if not goal:
+        goal = click.prompt("Goal")
+    if not success_criteria:
+        success_criteria = click.prompt("Success criteria")
+    if not active_profile:
+        active_profile = click.prompt("Active profile", default="goal-chaser")
+    if not autonomy_level:
+        autonomy_level = click.prompt("Autonomy level", default="bounded")
+    if not allowed_actions:
+        allowed_actions = tuple(
+            _prompt_csv(
+                "Allowed actions (comma separated)",
+                "create experiments, launch runs, review results, save context",
+            )
+        )
+    if not constraints:
+        constraints = tuple(_prompt_csv("Constraints (comma separated)", "single-user only"))
+    if not stop_conditions:
+        stop_conditions = tuple(
+            _prompt_csv("Stop conditions (comma separated)", "ask when unsure, stop on repeated failure")
+        )
+    if not notes and not as_json:
+        notes = click.prompt("Notes", default="", show_default=False)
+
+    payload = _run_command(
+        onboard_workflow(
+            goal=goal,
+            success_criteria=success_criteria,
+            active_profile=active_profile,
+            autonomy_level=autonomy_level,
+            allowed_actions=list(allowed_actions),
+            constraints=list(constraints),
+            stop_conditions=list(stop_conditions),
+            notes=notes,
+            actor_type=actor_type,
+        )
+    )
+    summary = (
+        f"Onboarding saved for goal '{payload['contract']['goal']}' "
+        f"with profile '{payload['contract']['active_profile']}'."
+    )
+    _emit_result(payload, as_json, summary)
+
+
+@workflow.command("onboard-show")
+@click.option("--json", "as_json", is_flag=True, help="Emit machine-readable JSON.")
+def workflow_onboard_show(as_json: bool):
+    """Show the persisted onboarding contract, if present."""
+    payload = _run_command(onboarding_summary_workflow())
+    summary = payload.get("message") or (
+        f"Current goal: {payload['contract']['goal']} "
+        f"(profile: {payload['contract']['active_profile']})"
+    )
+    _emit_result(payload, as_json, summary)
+
+
 @cli.command()
 def init_db():
     """Initialize the PostgreSQL database schema."""
@@ -743,12 +937,46 @@ def ultrawork_profile_list(as_json: bool):
 @ultrawork.command(name="run")
 @click.argument("profile_name")
 @click.option("--goal", default="", help="Optional operator goal to attach to the run contract.")
+@click.option("--execute", is_flag=True, help="Execute the bounded profile loop instead of only printing its contract.")
+@click.option("--command", default="", help="Optional local shell command for executable profiles.")
+@click.option("--experiment-id", default="", help="Optional existing experiment id.")
+@click.option("--name", default="", help="Experiment name for executable profiles.")
+@click.option("--hypothesis", default="")
+@click.option("--dataset", default="")
+@click.option("--model-type", default="")
 @click.option("--json", "as_json", is_flag=True, help="Emit machine-readable JSON output.")
-def ultrawork_run(profile_name: str, goal: str, as_json: bool):
+def ultrawork_run(
+    profile_name: str,
+    goal: str,
+    execute: bool,
+    command: str,
+    experiment_id: str,
+    name: str,
+    hypothesis: str,
+    dataset: str,
+    model_type: str,
+    as_json: bool,
+):
     """Emit the execution contract for a named ultrawork profile."""
     try:
-        contract = build_ultrawork_run_plan(profile_name, goal=goal)
+        if execute:
+            contract = _run_command(
+                execute_ultrawork_profile(
+                    profile_name,
+                    goal=goal,
+                    command=command,
+                    experiment_id=experiment_id,
+                    name=name,
+                    hypothesis=hypothesis,
+                    dataset=dataset,
+                    model_type=model_type,
+                )
+            )
+        else:
+            contract = build_ultrawork_run_plan(profile_name, goal=goal)
     except KeyError as exc:
+        raise click.ClickException(str(exc)) from exc
+    except ValueError as exc:
         raise click.ClickException(str(exc)) from exc
 
     if as_json:

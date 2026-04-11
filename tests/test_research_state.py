@@ -8,7 +8,9 @@ from research_copilot.research_state import (
     FileBackedCollection,
     build_provenance,
     get_research_root,
+    load_onboarding_contract,
     save_record,
+    save_onboarding_contract,
 )
 
 
@@ -87,3 +89,30 @@ def test_build_provenance_captures_related_ids() -> None:
         "related_job_id": "job-456",
         "content_kind": "inferred",
     }
+
+
+def test_save_onboarding_contract_persists_json_and_markdown(monkeypatch, tmp_path) -> None:
+    monkeypatch.chdir(tmp_path)
+
+    saved = save_onboarding_contract(
+        goal="Reduce overfitting on the baseline model",
+        success_criteria="Validation gap below 2%",
+        active_profile="overfit-hunter",
+        autonomy_level="bounded",
+        allowed_actions=["create experiments", "launch runs"],
+        constraints=["single-user only", "local machine only"],
+        stop_conditions=["stop after 3 failed runs"],
+        notes="Start with regularization ablations.",
+        actor="human",
+    )
+
+    root = get_research_root()
+    json_path = root / "onboarding" / "current.json"
+    md_path = root / "onboarding" / "interview.md"
+
+    assert json_path.exists()
+    assert md_path.exists()
+    assert saved["goal"] == "Reduce overfitting on the baseline model"
+    assert saved["provenance"]["actor"] == "human"
+    assert load_onboarding_contract()["active_profile"] == "overfit-hunter"
+    assert "Validation gap below 2%" in md_path.read_text(encoding="utf-8")

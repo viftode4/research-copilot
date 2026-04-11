@@ -107,6 +107,11 @@ def test_workflow_help_lists_named_commands():
     assert "monitor-run" in result.output
     assert "review-results" in result.output
     assert "research-context" in result.output
+    assert "onboard" in result.output
+    assert "onboard-show" in result.output
+    assert "run-experiment" in result.output
+    assert "overfitting-check" in result.output
+    assert "next-step" in result.output
 
 
 
@@ -290,3 +295,131 @@ def test_launch_experiment_command_emits_json_and_updates_state():
     assert payload["workflow"] == "launch-experiment"
     assert payload["experiment"]["name"] == "CLI launch"
     assert payload["job"]["job_id"] in _mock_jobs
+
+
+def test_onboard_workflow_can_prompt_and_show_saved_contract(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+
+    result = runner.invoke(
+        cli,
+        ["workflow", "onboard"],
+        input=(
+            "Test whether random.Random() shows simple patterns\n"
+            "Store one completed experiment with a written review\n"
+            "overfit-hunter\n"
+            "bounded\n"
+            "create experiments, launch runs, review results\n"
+            "single-user only, local machine only\n"
+            "stop after repeated failures, ask when unsure\n"
+            "Use this as the onboarding baseline.\n"
+        ),
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "Onboarding saved" in result.output
+
+    show_result = runner.invoke(cli, ["workflow", "onboard-show", "--json"])
+    assert show_result.exit_code == 0
+    show_payload = json.loads(show_result.output)
+    assert show_payload["configured"] is True
+    assert show_payload["contract"]["goal"] == "Test whether random.Random() shows simple patterns"
+    assert show_payload["contract"]["active_profile"] == "overfit-hunter"
+
+
+def test_onboard_workflow_json_mode_requires_explicit_fields(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+
+    result = runner.invoke(cli, ["workflow", "onboard", "--json"])
+
+    assert result.exit_code != 0
+    assert "JSON mode requires explicit values" in result.output
+
+
+def test_run_experiment_and_reasoning_commands_emit_json(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+
+    run_result = runner.invoke(
+        cli,
+        [
+            "workflow",
+            "run-experiment",
+            "--name",
+            "Local run",
+            "--command",
+            "python -c \"import json; print(json.dumps({'train_loss': 0.1, 'val_loss': 0.14, 'test_loss': 0.16}))\"",
+            "--json",
+        ],
+    )
+    assert run_result.exit_code == 0, run_result.output
+    run_payload = json.loads(run_result.output)
+    experiment_id = run_payload["experiment"]["id"]
+    assert run_payload["run"]["status"] == "completed"
+
+    overfit_result = runner.invoke(
+        cli,
+        ["workflow", "overfitting-check", experiment_id, "--json"],
+    )
+    next_step_result = runner.invoke(
+        cli,
+        ["workflow", "next-step", experiment_id, "--json"],
+    )
+
+    assert overfit_result.exit_code == 0
+    assert next_step_result.exit_code == 0
+    assert json.loads(overfit_result.output)["review"]["score_gaps"]["validation_gap"] == pytest.approx(0.04)
+    assert json.loads(next_step_result.output)["review"]["suggestions"]
+
+
+def test_ultrawork_run_can_execute_active_onboarding_profile(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+
+    onboard_result = runner.invoke(
+        cli,
+        [
+            "workflow",
+            "onboard",
+            "--goal",
+            "Diagnose overfitting",
+            "--success-criteria",
+            "Persist one diagnosis and next step",
+            "--active-profile",
+            "overfit-hunter",
+            "--autonomy-level",
+            "bounded",
+            "--allowed-action",
+            "launch runs",
+            "--allowed-action",
+            "review results",
+            "--constraint",
+            "single-user only",
+            "--stop-condition",
+            "stop when diagnosis exists",
+            "--json",
+        ],
+    )
+    assert onboard_result.exit_code == 0, onboard_result.output
+
+    run_result = runner.invoke(
+        cli,
+        [
+            "ultrawork",
+            "run",
+            "active",
+            "--execute",
+            "--name",
+            "auto-run",
+            "--command",
+            "python -c \"import json; print(json.dumps({'train_loss': 0.1, 'val_loss': 0.18, 'test_loss': 0.2}))\"",
+            "--json",
+        ],
+    )
+
+    assert run_result.exit_code == 0, run_result.output
+    payload = json.loads(run_result.output)
+    assert payload["status"] == "completed"
+    assert payload["profile"]["name"] == "overfit-hunter"
+    assert payload["steps"][1]["step"] == "overfitting-check"

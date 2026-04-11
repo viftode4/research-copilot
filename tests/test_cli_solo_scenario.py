@@ -48,7 +48,9 @@ def _invoke_json(runner: CliRunner, args: list[str]) -> dict[str, object]:
 
 def test_seeded_solo_cli_flow_covers_research_launch_monitor_and_review(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
 ) -> None:
+    monkeypatch.chdir(tmp_path)
     monkeypatch.setattr("research_copilot.services.workflows.handle_search_papers", _fake_search)
     runner = CliRunner()
 

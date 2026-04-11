@@ -11,8 +11,13 @@ from research_copilot.mcp_servers.slurm import _mock_jobs
 from research_copilot.services.workflows import (
     launch_experiment,
     monitor_run,
+    onboard,
+    onboarding_summary,
+    overfitting_check,
+    next_step,
     research_context,
     review_results,
+    run_experiment,
     triage,
 )
 
@@ -144,3 +149,65 @@ async def test_research_context_can_save_first_paper_and_context(monkeypatch: py
     assert result["saved_paper"]["id"]
     assert _store["papers"][0]["workflow_name"] == "research-context"
     assert _store["context"][0]["workflow_name"] == "research-context"
+
+
+@pytest.mark.asyncio
+async def test_onboard_persists_contract_and_updates_context(monkeypatch: pytest.MonkeyPatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+
+    payload = await onboard(
+        goal="Find overfitting in the baseline",
+        success_criteria="Validation gap under 2%",
+        active_profile="overfit-hunter",
+        autonomy_level="bounded",
+        allowed_actions=["create experiments", "launch runs"],
+        constraints=["single-user only"],
+        stop_conditions=["ask when unsure"],
+        notes="Start with regularization changes.",
+        actor_type="human",
+    )
+    summary = await onboarding_summary()
+
+    assert payload["workflow"] == "onboard"
+    assert payload["contract"]["goal"] == "Find overfitting in the baseline"
+    assert summary["configured"] is True
+    assert summary["contract"]["active_profile"] == "overfit-hunter"
+    assert any(ctx["key"] == "current_goal" for ctx in _store["context"])
+
+
+@pytest.mark.asyncio
+async def test_run_experiment_executes_local_command_and_persists_run_artifact(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+
+    payload = await run_experiment(
+        command='python -c "import json; print(json.dumps({\'train_loss\': 0.10, \'val_loss\': 0.13, \'test_loss\': 0.14}))"',
+        name="local-run",
+        hypothesis="Local runner works",
+        actor_type="human",
+        created_by="solo",
+    )
+
+    assert payload["workflow"] == "run-experiment"
+    assert payload["run"]["status"] == "completed"
+    assert payload["metrics"]["val_loss"] == pytest.approx(0.13)
+    assert payload["experiment"]["status"] == "completed"
+
+
+@pytest.mark.asyncio
+async def test_overfitting_check_and_next_step_emit_review_artifacts(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    launched = await run_experiment(
+        command='python -c "import json; print(json.dumps({\'train_loss\': 0.05, \'val_loss\': 0.20, \'test_loss\': 0.22}))"',
+        name="overfit-check",
+        actor_type="human",
+        created_by="solo",
+    )
+    experiment_id = launched["experiment"]["id"]
+
+    overfit = await overfitting_check(experiment_id=experiment_id)
+    next_payload = await next_step(experiment_id=experiment_id)
+
+    assert overfit["workflow"] == "overfitting-check"
+    assert "validation_gap" in overfit["review"]["score_gaps"]
+    assert next_payload["workflow"] == "next-step"
+    assert next_payload["review"]["suggestions"]

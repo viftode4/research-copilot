@@ -12,6 +12,7 @@ from typing import Any
 
 SCHEMA_VERSION = "1.0"
 CANONICAL_DIRECTORIES = (
+    "onboarding",
     "goals",
     "experiments",
     "runs",
@@ -30,6 +31,7 @@ class ResearchStatePaths:
     """Typed path bundle for the canonical research state layout."""
 
     root: Path
+    onboarding: Path
     goals: Path
     experiments: Path
     runs: Path
@@ -68,6 +70,7 @@ def get_research_state_paths() -> ResearchStatePaths:
     root = ensure_research_root()
     return ResearchStatePaths(
         root=root,
+        onboarding=root / "onboarding",
         goals=root / "goals",
         experiments=root / "experiments",
         runs=root / "runs",
@@ -174,6 +177,92 @@ def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
     temp_path.replace(path)
 
 
+def _atomic_write_text(path: Path, content: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = path.with_suffix(f"{path.suffix}.tmp")
+    temp_path.write_text(content, encoding="utf-8")
+    temp_path.replace(path)
+
+
+def _artifact_dir(name: str) -> Path:
+    paths = get_research_state_paths()
+    try:
+        return getattr(paths, name)
+    except AttributeError as exc:
+        raise ValueError(f"Unknown research artifact directory '{name}'") from exc
+
+
+def save_named_artifact(directory: str, name: str, payload: dict[str, Any]) -> dict[str, Any]:
+    """Persist a named JSON artifact under a canonical research-state directory."""
+    path = _artifact_dir(directory) / f"{_slugify(name)}.json"
+    _atomic_write_json(path, payload)
+    return payload
+
+
+def load_named_artifact(directory: str, name: str) -> dict[str, Any]:
+    """Load a named JSON artifact from a canonical research-state directory."""
+    path = _artifact_dir(directory) / f"{_slugify(name)}.json"
+    if not path.exists():
+        return {}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def save_run_artifact(
+    run_id: str,
+    payload: dict[str, Any],
+    *,
+    stdout: str = "",
+    stderr: str = "",
+    metrics: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Persist a run artifact bundle under `.omx/research/runs/<run-id>/`."""
+    run_dir = _artifact_dir("runs") / _slugify(run_id)
+    run_dir.mkdir(parents=True, exist_ok=True)
+    _atomic_write_json(run_dir / "status.json", payload)
+    _atomic_write_text(run_dir / "stdout.log", stdout)
+    _atomic_write_text(run_dir / "stderr.log", stderr)
+    _atomic_write_json(run_dir / "metrics.json", metrics or {})
+    return payload
+
+
+def load_run_artifact(run_id: str) -> dict[str, Any]:
+    """Load a persisted run artifact bundle if one exists."""
+    run_dir = _artifact_dir("runs") / _slugify(run_id)
+    status_path = run_dir / "status.json"
+    if not status_path.exists():
+        return {}
+    try:
+        status = json.loads(status_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return {}
+    stdout = (run_dir / "stdout.log").read_text(encoding="utf-8") if (run_dir / "stdout.log").exists() else ""
+    stderr = (run_dir / "stderr.log").read_text(encoding="utf-8") if (run_dir / "stderr.log").exists() else ""
+    metrics_path = run_dir / "metrics.json"
+    metrics: dict[str, Any] = {}
+    if metrics_path.exists():
+        try:
+            loaded_metrics = json.loads(metrics_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            loaded_metrics = {}
+        if isinstance(loaded_metrics, dict):
+            metrics = loaded_metrics
+    if isinstance(status, dict):
+        status["stdout"] = stdout
+        status["stderr"] = stderr
+        status["metrics"] = metrics
+        return status
+    return {}
+
+
+def save_review_artifact(review_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+    """Persist a structured review artifact under `.omx/research/reviews/`."""
+    return save_named_artifact("reviews", review_id, payload)
+
+
 def load_records(family: str) -> list[dict[str, Any]]:
     """Load all persisted records for a family."""
     directory = _family_dir(family)
@@ -241,3 +330,81 @@ class FileBackedCollection(list[dict[str, Any]]):
     def clear(self) -> None:  # type: ignore[override]
         clear_records(self.family)
         super().clear()
+
+
+def onboarding_current_path() -> Path:
+    """Return the canonical onboarding contract artifact path."""
+    return ensure_research_root() / "onboarding" / "current.json"
+
+
+def onboarding_interview_path() -> Path:
+    """Return the canonical onboarding transcript artifact path."""
+    return ensure_research_root() / "onboarding" / "interview.md"
+
+
+def save_onboarding_contract(
+    *,
+    goal: str,
+    success_criteria: str,
+    active_profile: str,
+    autonomy_level: str,
+    allowed_actions: list[str],
+    constraints: list[str],
+    stop_conditions: list[str],
+    notes: str,
+    actor: str = "human",
+    workflow_name: str = "onboard",
+) -> dict[str, Any]:
+    """Persist the current onboarding contract and its human-readable interview summary."""
+    timestamp = utc_now_iso()
+    payload = {
+        "schema_version": SCHEMA_VERSION,
+        "goal": goal,
+        "success_criteria": success_criteria,
+        "active_profile": active_profile,
+        "autonomy_level": autonomy_level,
+        "allowed_actions": allowed_actions,
+        "constraints": constraints,
+        "stop_conditions": stop_conditions,
+        "notes": notes,
+        "updated_at": timestamp,
+        "provenance": build_provenance(
+            {
+                "actor_type": actor,
+                "workflow_name": workflow_name,
+                "content_kind": "inferred",
+            },
+            content_kind="inferred",
+            timestamp=timestamp,
+        ),
+    }
+    _atomic_write_json(onboarding_current_path(), payload)
+    interview = "\n".join(
+        [
+            "# Research Onboarding",
+            "",
+            f"- Goal: {goal}",
+            f"- Success criteria: {success_criteria}",
+            f"- Active profile: {active_profile}",
+            f"- Autonomy level: {autonomy_level}",
+            f"- Allowed actions: {', '.join(allowed_actions) if allowed_actions else 'None recorded'}",
+            f"- Constraints: {', '.join(constraints) if constraints else 'None recorded'}",
+            f"- Stop conditions: {', '.join(stop_conditions) if stop_conditions else 'None recorded'}",
+            f"- Notes: {notes or 'None recorded'}",
+            f"- Updated at: {timestamp}",
+        ]
+    )
+    _atomic_write_text(onboarding_interview_path(), interview)
+    return payload
+
+
+def load_onboarding_contract() -> dict[str, Any]:
+    """Load the current onboarding contract if one exists."""
+    path = onboarding_current_path()
+    if not path.exists():
+        return {}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return {}
+    return payload if isinstance(payload, dict) else {}
