@@ -13,6 +13,11 @@ The primary user experience is a full-screen TUI inspired by tools such as lazyg
 
 The `research-copilot` command remains the main entrypoint. Non-interactive utilities such as configuration inspection and database bootstrap stay available for scripting and admin tasks.
 
+## Workflow command reference
+
+Planned agent-facing workflow commands and ultrawork profile contracts are documented in
+`docs/cli-workflows.md`.
+
 ## Web surface removal
 
 The old FastAPI chat/dashboard surface has been removed. The supported workflow is now the terminal UI launched by `research-copilot`.
