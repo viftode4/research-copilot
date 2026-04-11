@@ -93,10 +93,15 @@ def apply_storage_contract(
     existing_provenance = normalized.get("provenance")
     if not isinstance(existing_provenance, dict):
         existing_provenance = {}
-    provenance = build_provenance(args, content_kind=content_kind, timestamp=timestamp)
     provenance = {
-        **provenance,
         **{key: value for key, value in existing_provenance.items() if value not in ("", None)},
+        **{
+            key: value
+            for key, value in build_provenance(
+                args, content_kind=content_kind, timestamp=timestamp
+            ).items()
+            if value not in ("", None)
+        },
     }
     if family == "insights":
         provenance["content_kind"] = provenance.get("content_kind") or "inferred"
