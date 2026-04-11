@@ -10,6 +10,8 @@ The primary user experience is a full-screen TUI inspired by tools such as lazyg
 - job and log inspection
 - experiment status, configuration, and results
 - knowledge-base and saved-paper context in secondary views
+- read-only drill-down across runs, experiments, and linked research
+- progressive v1b affordances for search/filter/sort and deeper log inspection without changing workflow state
 
 The `research-copilot` command is the canonical entrypoint. Install it once, initialize a workspace in any folder, and keep humans and agents on the same local state. The canonical local state root is `.research-copilot/`; existing `.omx/research/` workspaces are read-compatible during the transition and can be migrated with `research-copilot migrate`. Non-interactive utilities such as onboarding, workflow execution, configuration inspection, and workspace bootstrap stay available for scripting and operator automation.
 
@@ -64,6 +66,16 @@ The `research-copilot` command is the canonical entrypoint. Install it once, ini
 
 - `docs/cli-workflows.md` — canonical workflow, install, init, and agent-companion reference
 - `docs/seeded-solo-cli-scenario.md` — focused smoke scenario for the seeded solo CLI path
+
+## TUI interaction model
+
+The terminal dashboard stays human-facing and read-only:
+
+- **v1a baseline:** screen switching, pane focus, selection movement, linked-research drill-down, help, refresh, and log summaries.
+- **v1b read-only expansion:** search/filter/sort per pane, richer contextual inspection, and full-log drill-down for the selected run without embedding full logs into the canonical snapshot.
+- **Safety boundary:** no mutating workflow actions ship through the TUI in v1a or v1b; agents should keep using `research-copilot ... --json` and durable workspace artifacts.
+
+The canonical snapshot remains the source of truth for overview data. When deeper inspection is needed, the TUI resolves the selected item by stable entity identity and uses dedicated retrieval flows for full logs rather than stuffing raw log bodies into machine-facing snapshot JSON.
 
 ## Bootstrap and agent modes
 
