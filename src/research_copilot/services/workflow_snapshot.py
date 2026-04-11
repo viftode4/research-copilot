@@ -5,11 +5,8 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from typing import Any
 
-from research_copilot.mcp_servers.knowledge_base import _store
-from research_copilot.mcp_servers.slurm import MockJob, _mock_jobs
-
-ACTIVE_JOB_STATUSES = frozenset({"PENDING", "RUNNING"})
-ACTIVE_EXPERIMENT_STATUSES = frozenset({"planned", "queued", "running"})
+from research_copilot.mcp_servers.slurm import MockJob
+from research_copilot.services.research_ops import JobState, ResearchOpsService
 
 
 def _truncate_log(text: str, *, max_lines: int, max_chars: int) -> str:
@@ -24,7 +21,7 @@ def _truncate_log(text: str, *, max_lines: int, max_chars: int) -> str:
 
 
 def summarize_job(
-    job: MockJob,
+    job: JobState | MockJob,
     *,
     max_log_lines: int = 8,
     max_log_chars: int = 400,
@@ -35,7 +32,7 @@ def summarize_job(
         "job_id": job.job_id,
         "name": job.name,
         "status": job.status,
-        "is_active": job.status in ACTIVE_JOB_STATUSES,
+        "is_active": job.status in {"PENDING", "RUNNING"},
         "submitted_at": job.submitted_at,
         "started_at": job.started_at,
         "completed_at": job.completed_at,
@@ -43,12 +40,16 @@ def summarize_job(
         "gpus": job.gpus,
         "time_limit": job.time_limit,
         "stdout_preview": _truncate_log(
-            job.output, max_lines=max_log_lines, max_chars=max_log_chars
+            job.stdout if isinstance(job, JobState) else job.output,
+            max_lines=max_log_lines,
+            max_chars=max_log_chars,
         ),
         "stderr_preview": _truncate_log(
-            job.error, max_lines=max_log_lines, max_chars=max_log_chars
+            job.stderr if isinstance(job, JobState) else job.error,
+            max_lines=max_log_lines,
+            max_chars=max_log_chars,
         )
-        if job.error
+        if (job.stderr if isinstance(job, JobState) else job.error)
         else "",
     }
 
@@ -101,8 +102,13 @@ def build_workflow_snapshot(
 ) -> dict[str, Any]:
     """Build the overview payload consumed by the terminal workflow UI."""
 
-    source_store = store or _store
-    source_jobs = jobs or _mock_jobs
+    service = ResearchOpsService(store=store, jobs=jobs)
+    state = service.snapshot(
+        job_limit=max_items,
+        experiment_limit=max_items,
+        paper_limit=max_items,
+        context_limit=max_items,
+    )
 
     job_items = sorted(
         (
@@ -111,7 +117,7 @@ def build_workflow_snapshot(
                 max_log_lines=max_log_lines,
                 max_log_chars=max_log_chars,
             )
-            for job in source_jobs.values()
+            for job in state.jobs
         ),
         key=lambda item: (
             not item["is_active"],
@@ -121,16 +127,31 @@ def build_workflow_snapshot(
         reverse=True,
     )
     experiment_items = [
-        summarize_experiment(experiment, jobs=source_jobs)
-        for experiment in source_store.get("experiments", [])
+        {
+            "id": experiment.experiment_id,
+            "name": experiment.name,
+            "status": experiment.status,
+            "is_active": experiment.is_active,
+            "hypothesis": experiment.hypothesis,
+            "dataset": experiment.dataset,
+            "model_type": experiment.model_type,
+            "tags": list(experiment.tags),
+            "result_keys": sorted(experiment.results.keys()),
+            "has_results": bool(experiment.results),
+            "linked_job_id": experiment.linked_job_id,
+            "linked_job_status": experiment.linked_job_status,
+            "updated_at": experiment.updated_at,
+            "created_at": experiment.created_at,
+        }
+        for experiment in state.experiments
     ]
     experiment_items.sort(
         key=lambda item: (item["is_active"], item["updated_at"], item["id"]),
         reverse=True,
     )
 
-    papers = list(source_store.get("papers", []))
-    context_entries = list(source_store.get("context", []))
+    papers = list(reversed(state.papers))
+    context_entries = list(reversed(state.context_entries))
 
     return {
         "jobs": {
@@ -141,28 +162,28 @@ def build_workflow_snapshot(
         "experiments": {
             "total": len(experiment_items),
             "active": sum(1 for item in experiment_items if item["is_active"]),
-            "by_status": _status_counts(source_store.get("experiments", [])),
+            "by_status": state.experiment_status_counts,
             "items": experiment_items[:max_items],
         },
         "knowledge": {
-            "insights_total": len(source_store.get("insights", [])),
+            "insights_total": len(state.insights),
             "papers_total": len(papers),
             "context_total": len(context_entries),
             "recent_papers": [
                 {
-                    "id": paper.get("id", ""),
-                    "title": paper.get("title", ""),
-                    "year": paper.get("year"),
-                    "tags": list(paper.get("tags") or []),
+                    "id": paper.paper_id,
+                    "title": paper.title,
+                    "year": paper.year,
+                    "tags": list(paper.tags),
                 }
                 for paper in papers[-max_items:]
             ],
             "recent_context": [
                 {
-                    "id": entry.get("id", ""),
-                    "key": entry.get("key", ""),
-                    "context_type": entry.get("context_type", ""),
-                    "value": entry.get("value", ""),
+                    "id": entry.context_id,
+                    "key": entry.key,
+                    "context_type": entry.context_type,
+                    "value": entry.value,
                 }
                 for entry in context_entries[-max_items:]
             ],

@@ -7,10 +7,11 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
-from research_copilot.mcp_servers.knowledge_base import _store
-from research_copilot.mcp_servers.slurm import MockJob, _mock_jobs
-
-ACTIVE_JOB_STATUSES = frozenset({"PENDING", "RUNNING"})
+from research_copilot.services.research_ops import (
+    ACTIVE_JOB_STATUSES,
+    ResearchOpsService,
+    ResearchOpsState,
+)
 
 
 def _parse_timestamp(value: str) -> datetime | None:
@@ -123,18 +124,26 @@ class DashboardSnapshot:
         return self.experiment_status_counts.get("running", 0)
 
 
-def _job_sort_key(job: MockJob) -> tuple[int, str]:
-    parsed = _parse_timestamp(job.submitted_at)
-    return (int(parsed.timestamp()) if parsed else 0, job.job_id)
+def _load_state(
+    *,
+    service: ResearchOpsService | None = None,
+    job_limit: int | None = None,
+    experiment_limit: int | None = None,
+    insight_limit: int | None = None,
+    paper_limit: int | None = None,
+    context_limit: int | None = None,
+) -> ResearchOpsState:
+    return (service or ResearchOpsService()).snapshot(
+        job_limit=job_limit,
+        experiment_limit=experiment_limit,
+        insight_limit=insight_limit,
+        paper_limit=paper_limit,
+        context_limit=context_limit,
+    )
 
 
-def _experiment_sort_key(record: dict[str, Any]) -> tuple[int, str]:
-    updated = _parse_timestamp(record.get("updated_at", "") or record.get("created_at", ""))
-    return (int(updated.timestamp()) if updated else 0, record.get("id", ""))
-
-
-def load_job_records(limit: int = 20) -> tuple[JobRecord, ...]:
-    jobs = sorted(_mock_jobs.values(), key=_job_sort_key, reverse=True)[:limit]
+def load_job_records(limit: int = 20, *, service: ResearchOpsService | None = None) -> tuple[JobRecord, ...]:
+    state = _load_state(service=service, job_limit=limit)
     return tuple(
         JobRecord(
             job_id=job.job_id,
@@ -146,91 +155,166 @@ def load_job_records(limit: int = 20) -> tuple[JobRecord, ...]:
             started_at=job.started_at,
             completed_at=job.completed_at,
             time_limit=job.time_limit,
-            log_tail=tail_text(job.output),
-            error_tail=tail_text(job.error, empty_message="(no stderr)"),
+            log_tail=tail_text(job.stdout),
+            error_tail=tail_text(job.stderr, empty_message="(no stderr)"),
         )
-        for job in jobs
+        for job in state.jobs
     )
 
 
-def load_experiment_records(limit: int = 20) -> tuple[ExperimentRecord, ...]:
-    experiments = sorted(_store["experiments"], key=_experiment_sort_key, reverse=True)[:limit]
+def load_experiment_records(
+    limit: int = 20, *, service: ResearchOpsService | None = None
+) -> tuple[ExperimentRecord, ...]:
+    state = _load_state(service=service, experiment_limit=limit)
     return tuple(
         ExperimentRecord(
-            experiment_id=experiment["id"],
-            name=experiment["name"],
-            status=experiment.get("status", "planned"),
-            hypothesis=experiment.get("hypothesis", ""),
-            description=experiment.get("description", ""),
-            dataset=experiment.get("dataset", ""),
-            model_type=experiment.get("model_type", ""),
-            tags=tuple(experiment.get("tags", [])),
-            updated_at=experiment.get("updated_at", experiment.get("created_at", "")),
-            results_summary=summarize_mapping(experiment.get("results", {})),
-            wandb_run_id=experiment.get("wandb_run_id", ""),
-            slurm_job_id=experiment.get("slurm_job_id", ""),
+            experiment_id=experiment.experiment_id,
+            name=experiment.name,
+            status=experiment.status,
+            hypothesis=experiment.hypothesis,
+            description=experiment.description,
+            dataset=experiment.dataset,
+            model_type=experiment.model_type,
+            tags=experiment.tags,
+            updated_at=experiment.updated_at,
+            results_summary=summarize_mapping(experiment.results),
+            wandb_run_id=experiment.wandb_run_id,
+            slurm_job_id=experiment.linked_job_id or "",
         )
-        for experiment in experiments
+        for experiment in state.experiments
     )
 
 
-def load_insight_records(limit: int = 10) -> tuple[InsightRecord, ...]:
-    insights = list(_store["insights"])[-limit:]
-    insights.reverse()
+def load_insight_records(
+    limit: int = 10, *, service: ResearchOpsService | None = None
+) -> tuple[InsightRecord, ...]:
+    state = _load_state(service=service, insight_limit=limit)
     return tuple(
         InsightRecord(
-            insight_id=insight["id"],
-            title=insight["title"],
-            category=insight.get("category", "observation"),
+            insight_id=insight.insight_id,
+            title=insight.title,
+            category=insight.category,
             confidence=(
-                f"{insight['confidence']:.2f}" if isinstance(insight.get("confidence"), float) else "—"
+                f"{insight.confidence:.2f}" if isinstance(insight.confidence, float) else "—"
             ),
-            content=insight.get("content", ""),
-            created_at=insight.get("created_at", ""),
+            content=insight.content,
+            created_at=insight.created_at,
         )
-        for insight in insights
+        for insight in state.insights
     )
 
 
-def load_paper_records(limit: int = 10) -> tuple[PaperRecord, ...]:
-    papers = list(_store["papers"])[-limit:]
-    papers.reverse()
+def load_paper_records(
+    limit: int = 10, *, service: ResearchOpsService | None = None
+) -> tuple[PaperRecord, ...]:
+    state = _load_state(service=service, paper_limit=limit)
     return tuple(
         PaperRecord(
-            paper_id=paper["id"],
-            title=paper["title"],
-            authors=tuple(paper.get("authors", [])),
-            year=str(paper.get("year") or "—"),
-            relevance_notes=paper.get("relevance_notes", ""),
-            added_at=paper.get("added_at", ""),
+            paper_id=paper.paper_id,
+            title=paper.title,
+            authors=paper.authors,
+            year=str(paper.year or "—"),
+            relevance_notes=paper.relevance_notes,
+            added_at=paper.added_at,
         )
-        for paper in papers
+        for paper in state.papers
     )
 
 
-def load_context_records(limit: int = 10) -> tuple[ContextRecord, ...]:
-    context_entries = list(_store["context"])[-limit:]
-    context_entries.reverse()
+def load_context_records(
+    limit: int = 10, *, service: ResearchOpsService | None = None
+) -> tuple[ContextRecord, ...]:
+    state = _load_state(service=service, context_limit=limit)
     return tuple(
         ContextRecord(
-            context_id=context["id"],
-            key=context["key"],
-            context_type=context.get("context_type", "note"),
-            value=context.get("value", ""),
-            updated_at=context.get("updated_at", ""),
+            context_id=context.context_id,
+            key=context.key,
+            context_type=context.context_type,
+            value=context.value,
+            updated_at=context.updated_at,
         )
-        for context in context_entries
+        for context in state.context_entries
     )
 
 
-def build_dashboard_snapshot() -> DashboardSnapshot:
-    experiments = load_experiment_records()
+def build_dashboard_snapshot(*, service: ResearchOpsService | None = None) -> DashboardSnapshot:
+    state = _load_state(
+        service=service,
+        job_limit=20,
+        experiment_limit=20,
+        insight_limit=10,
+        paper_limit=10,
+        context_limit=10,
+    )
+    experiments = tuple(
+        ExperimentRecord(
+            experiment_id=experiment.experiment_id,
+            name=experiment.name,
+            status=experiment.status,
+            hypothesis=experiment.hypothesis,
+            description=experiment.description,
+            dataset=experiment.dataset,
+            model_type=experiment.model_type,
+            tags=experiment.tags,
+            updated_at=experiment.updated_at,
+            results_summary=summarize_mapping(experiment.results),
+            wandb_run_id=experiment.wandb_run_id,
+            slurm_job_id=experiment.linked_job_id or "",
+        )
+        for experiment in state.experiments
+    )
     status_counts = Counter(experiment.status for experiment in experiments)
     return DashboardSnapshot(
-        jobs=load_job_records(),
+        jobs=tuple(
+            JobRecord(
+                job_id=job.job_id,
+                name=job.name,
+                status=job.status,
+                partition=job.partition,
+                gpus=job.gpus,
+                submitted_at=job.submitted_at,
+                started_at=job.started_at,
+                completed_at=job.completed_at,
+                time_limit=job.time_limit,
+                log_tail=tail_text(job.stdout),
+                error_tail=tail_text(job.stderr, empty_message="(no stderr)"),
+            )
+            for job in state.jobs
+        ),
         experiments=experiments,
-        insights=load_insight_records(),
-        papers=load_paper_records(),
-        context_entries=load_context_records(),
+        insights=tuple(
+            InsightRecord(
+                insight_id=insight.insight_id,
+                title=insight.title,
+                category=insight.category,
+                confidence=f"{insight.confidence:.2f}"
+                if isinstance(insight.confidence, float)
+                else "—",
+                content=insight.content,
+                created_at=insight.created_at,
+            )
+            for insight in state.insights
+        ),
+        papers=tuple(
+            PaperRecord(
+                paper_id=paper.paper_id,
+                title=paper.title,
+                authors=paper.authors,
+                year=str(paper.year or "—"),
+                relevance_notes=paper.relevance_notes,
+                added_at=paper.added_at,
+            )
+            for paper in state.papers
+        ),
+        context_entries=tuple(
+            ContextRecord(
+                context_id=context.context_id,
+                key=context.key,
+                context_type=context.context_type,
+                value=context.value,
+                updated_at=context.updated_at,
+            )
+            for context in state.context_entries
+        ),
         experiment_status_counts=dict(status_counts),
     )
