@@ -64,6 +64,7 @@ class ExperimentState:
     created_at: str
     updated_at: str
     results: dict[str, Any]
+    wandb_run_id: str
     linked_job_id: str | None
     linked_job_status: str | None
     is_active: bool
@@ -74,7 +75,7 @@ class InsightState:
     insight_id: str
     title: str
     category: str
-    confidence: str
+    confidence: float | str | None
     content: str
     created_at: str
 
@@ -219,6 +220,7 @@ class ResearchOpsService:
                     created_at=str(experiment.get("created_at", "")),
                     updated_at=str(experiment.get("updated_at", experiment.get("created_at", ""))),
                     results=dict(experiment.get("results", {}) or {}),
+                    wandb_run_id=str(experiment.get("wandb_run_id", "")),
                     linked_job_id=linked_job_id,
                     linked_job_status=linked_job.status if linked_job else None,
                     is_active=str(experiment.get("status", "")).lower() in ACTIVE_EXPERIMENT_STATUSES,
@@ -241,11 +243,7 @@ class ResearchOpsService:
                 insight_id=str(insight.get("id", "")),
                 title=str(insight.get("title", "")),
                 category=str(insight.get("category", "observation")),
-                confidence=(
-                    f"{insight['confidence']:.2f}"
-                    if isinstance(insight.get("confidence"), float)
-                    else "—"
-                ),
+                confidence=insight.get("confidence"),
                 content=str(insight.get("content", "")),
                 created_at=str(insight.get("created_at", "")),
             )
