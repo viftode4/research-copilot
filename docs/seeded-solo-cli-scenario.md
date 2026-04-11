@@ -4,6 +4,12 @@ This example documents the single-operator CLI flow covered by `tests/test_cli_s
 It stays CLI-only, uses the in-memory mock backends, and proves the current MVP flow without a DB,
 web surface, or multi-user coordination.
 
+Start every workspace with the canonical bootstrap command:
+
+```bash
+research-copilot init
+```
+
 Before running the seeded mock flow, the recommended onboarding command for the local
 random-data Python case is:
 
@@ -97,5 +103,5 @@ research-copilot workflow onboard \
 Run the focused end-to-end proof:
 
 ```bash
-python -m pytest tests/test_cli_solo_scenario.py -q
+pytest tests/test_cli_solo_scenario.py -q
 ```

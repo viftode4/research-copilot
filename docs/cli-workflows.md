@@ -3,16 +3,55 @@
 This document captures the CLI-facing workflow contract from `.omx/plans/prd-cli-research-ops-control-plane.md`.
 It is the operator and agent reference for the planned workflow commands and ultrawork profile names.
 
+`research-copilot` is the canonical command. Install it once, run `research-copilot init` in any folder, and keep the workspace-local `.omx/research` state authoritative. Humans can open the TUI with the bare command; Codex and Claude should use `--json` subcommands against the same workspace.
+
 ## Workflow model
 
 Research Copilot keeps a split interface:
 
+- `research-copilot init` bootstraps the current folder for local use.
 - `research-copilot` opens the human TUI dashboard.
 - `research-copilot status` is the human-readable readiness check for onboarding + next-step guidance.
 - `research-copilot ... --json` is the stable agent-facing surface.
 - Named workflows package common multi-step research-ops tasks into explicit commands.
 - `research-copilot workflow onboard` persists the current single-user operating contract before autonomous work begins.
 - Ultrawork profiles package repeatable parallel execution patterns with named lanes and expected outputs.
+
+## Install and workspace bootstrap
+
+### Install once
+
+```bash
+pipx install research-copilot
+```
+
+### Initialize a workspace
+
+Run this in an empty folder or an existing project:
+
+```bash
+research-copilot init
+```
+
+### Open the terminal UI
+
+```bash
+research-copilot
+```
+
+### Companion usage
+
+- **Human operator:** use `research-copilot` for the TUI and `research-copilot status` for a quick readiness check.
+- **Codex / Claude companion:** use `research-copilot workflow ... --json` from a second terminal or agent pane.
+- **Shared state:** both paths read and write the same local `.omx/research` files.
+
+Unless a section says otherwise, the examples below assume the workspace has already been initialized once with `research-copilot init`.
+
+## Bootstrap command summary
+
+| Command | Purpose | Primary CLI surface | Expected outcome |
+| --- | --- | --- | --- |
+| `init` | Bootstrap the current folder for local use | `research-copilot init` | Created or confirmed `.omx/research` workspace state |
 
 ## Workflow command summary
 
@@ -45,6 +84,7 @@ Research Copilot keeps a split interface:
 
 **Representative command flow:**
 ```bash
+research-copilot init
 research-copilot workflow onboard \
   --goal "Validate the random-data smoke baseline" \
   --success-criteria "Persist one reviewed run and a next step" \
@@ -55,6 +95,7 @@ research-copilot status
 ```
 
 **Expected output:**
+- initialized local workspace state
 - saved onboarding contract
 - clear goal/profile summary
 - next command suggestions such as `workflow triage`
@@ -80,6 +121,7 @@ research-copilot workflow triage --json
 ```
 
 **Expected output:**
+- initialized local workspace state
 - current-state summary
 - top blockers or anomalies
 - suggested next action
@@ -105,6 +147,7 @@ research-copilot workflow launch-experiment ... --json
 ```
 
 **Expected output:**
+- initialized local workspace state
 - registered experiment
 - submission artifact or job identifier
 - verification notes for the launch
@@ -130,6 +173,7 @@ research-copilot workflow monitor-run <id> --json
 ```
 
 **Expected output:**
+- initialized local workspace state
 - refreshed run status
 - recent log highlights
 - saved notes or operator follow-up items
@@ -155,6 +199,7 @@ research-copilot workflow review-results <id> --json
 ```
 
 **Expected output:**
+- initialized local workspace state
 - result summary
 - keep/drop recommendation
 - saved insight or context record
@@ -180,6 +225,7 @@ research-copilot workflow research-context <query> --json
 ```
 
 **Expected output:**
+- initialized local workspace state
 - short reading list
 - saved papers
 - updated context or notes
@@ -207,6 +253,7 @@ research-copilot workflow next-step <experiment-id> --json
 ```
 
 **Expected output:**
+- initialized local workspace state
 - persisted run artifact
 - metrics ready for review
 - explicit next-step recommendation

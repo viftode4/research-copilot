@@ -10,7 +10,14 @@ from typing import Any
 import click
 
 from research_copilot.config import load_config
-from research_copilot.research_state import load_onboarding_contract
+from research_copilot.research_state import (
+    get_last_workspace,
+    get_research_root,
+    initialize_workspace,
+    is_workspace_initialized,
+    load_onboarding_contract,
+    remember_workspace,
+)
 from research_copilot.services.research_ops import (
     add_insight as add_insight_service,
     cancel_job as cancel_job_service,
@@ -53,30 +60,80 @@ from research_copilot.tui.adapters import build_dashboard_snapshot
 
 
 CLI_EPILOG = """
-Start with: research-copilot workflow onboard
+Start with: research-copilot init
 Solo proof: docs/seeded-solo-cli-scenario.md
 """
 
 WORKFLOW_EPILOG = """
-Start with: research-copilot workflow onboard
+Start with: research-copilot init
 Then: research-copilot workflow triage --json
 Solo proof: docs/seeded-solo-cli-scenario.md
 """
 
+def _configure_workspace(workspace: str | None) -> tuple[str, str | None]:
+    target = workspace or os.getcwd()
+    resolved = os.path.abspath(target)
+    previous = os.environ.get("RC_WORKING_DIR")
+    os.environ["RC_WORKING_DIR"] = resolved
+    return resolved, previous
+
+
+def _restore_workspace(previous_workspace: str | None) -> None:
+    if previous_workspace is None:
+        os.environ.pop("RC_WORKING_DIR", None)
+        return
+    os.environ["RC_WORKING_DIR"] = previous_workspace
+
+
+def _emit_bootstrap_screen(workspace: str) -> None:
+    last_workspace = get_last_workspace()
+    click.echo("Research Copilot bootstrap")
+    click.echo("=" * 40)
+    click.echo(f"Workspace:    {workspace}")
+    click.echo("State:        Not initialized")
+    click.echo()
+    click.echo("Next steps:")
+    click.echo("  1. research-copilot init")
+    if last_workspace and last_workspace != workspace:
+        click.echo(f'  2. research-copilot --workspace "{last_workspace}"')
+    else:
+        click.echo("  2. research-copilot --help")
+    click.echo("  3. research-copilot workflow onboard --json")
+    click.echo()
+    click.echo("Noninteractive commands stay noninteractive; they never open the TUI unexpectedly.")
+
 
 @click.group(invoke_without_command=True, epilog=CLI_EPILOG.strip())
 @click.version_option(version="0.1.0")
+@click.option("--workspace", type=click.Path(file_okay=False, dir_okay=True, path_type=str), default=None, help="Optional workspace directory override.")
 @click.pass_context
-def cli(ctx: click.Context):
+def cli(ctx: click.Context, workspace: str | None):
     """Research Copilot — terminal workflow dashboard for ML research labs."""
+    resolved_workspace, previous_workspace = _configure_workspace(workspace)
+    ctx.call_on_close(lambda: _restore_workspace(previous_workspace))
+    ctx.obj = {"workspace": resolved_workspace}
     if ctx.invoked_subcommand is None:
+        if not is_workspace_initialized():
+            _emit_bootstrap_screen(resolved_workspace)
+            return
+        remember_workspace(get_research_root())
         launch_tui()
 
 
 @cli.command()
 def tui():
     """Open the full-screen terminal workflow dashboard."""
+    remember_workspace(get_research_root())
     launch_tui()
+
+
+@cli.command(name="init")
+@click.option("--json", "as_json", is_flag=True, help="Emit machine-readable JSON.")
+def init_workspace(as_json: bool):
+    """Initialize the current workspace for Research Copilot."""
+    payload = initialize_workspace()
+    summary = "Workspace already initialized." if payload["already_initialized"] else "Workspace initialized."
+    _emit_result(payload, as_json, summary)
 
 
 @cli.command()
@@ -85,6 +142,9 @@ def status():
     config = load_config()
     snapshot = build_dashboard_snapshot()
     onboarding = load_onboarding_contract()
+    initialized = is_workspace_initialized()
+    workspace_dir = os.path.abspath(os.getenv("RC_WORKING_DIR", os.getcwd()))
+    workspace_root = get_research_root()
 
     click.echo("Research Copilot Configuration")
     click.echo("=" * 40)
@@ -109,6 +169,11 @@ def status():
     click.echo(f"  Saved papers:      {len(snapshot.papers)}")
     click.echo(f"  Stored insights:   {len(snapshot.insights)}")
     click.echo()
+    click.echo("Workspace:")
+    click.echo(f"  Directory:        {workspace_dir}")
+    click.echo(f"  Research root:    {workspace_root}")
+    click.echo(f"  State:            {'Initialized' if initialized else 'Not initialized'}")
+    click.echo()
     click.echo("Onboarding:")
     if onboarding:
         click.echo("  State:            Configured")
@@ -117,7 +182,8 @@ def status():
         click.echo("  Next step:        research-copilot workflow triage")
     else:
         click.echo("  State:            Not configured")
-        click.echo("  Next step:        research-copilot workflow onboard")
+        next_step = "research-copilot workflow onboard" if initialized else "research-copilot init"
+        click.echo(f"  Next step:        {next_step}")
     click.echo()
     click.echo("Run 'research-copilot' or 'research-copilot tui' to open the terminal dashboard.")
 

@@ -7,8 +7,13 @@ import json
 from research_copilot.research_state import (
     FileBackedCollection,
     build_provenance,
+    ensure_research_root,
+    get_last_workspace,
+    get_recent_workspaces_registry_path,
     get_research_root,
     load_onboarding_contract,
+    load_recent_workspaces,
+    remember_workspace,
     save_record,
     save_onboarding_contract,
 )
@@ -116,3 +121,73 @@ def test_save_onboarding_contract_persists_json_and_markdown(monkeypatch, tmp_pa
     assert saved["provenance"]["actor"] == "human"
     assert load_onboarding_contract()["active_profile"] == "overfit-hunter"
     assert "Validation gap below 2%" in md_path.read_text(encoding="utf-8")
+
+
+def test_ensure_research_root_creates_canonical_directories(monkeypatch, tmp_path) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("RC_WORKING_DIR", str(tmp_path))
+
+    root = ensure_research_root()
+
+    assert root == tmp_path / ".omx" / "research"
+    for directory in (
+        "onboarding",
+        "goals",
+        "experiments",
+        "runs",
+        "reviews",
+        "notes",
+        "papers",
+        "context",
+        "profiles",
+        "insights",
+    ):
+        assert (root / directory).is_dir()
+
+
+def test_get_research_root_honors_working_dir_override_for_workspace_isolation(
+    monkeypatch, tmp_path
+) -> None:
+    workspace_a = tmp_path / "workspace-a"
+    workspace_b = tmp_path / "workspace-b"
+    workspace_a.mkdir()
+    workspace_b.mkdir()
+
+    monkeypatch.setenv("RC_WORKING_DIR", str(workspace_a))
+    root_a = ensure_research_root()
+
+    monkeypatch.setenv("RC_WORKING_DIR", str(workspace_b))
+    root_b = ensure_research_root()
+
+    assert root_a == workspace_a / ".omx" / "research"
+    assert root_b == workspace_b / ".omx" / "research"
+    assert root_a != root_b
+
+
+def test_recent_workspace_registry_stays_global_and_does_not_change_local_roots(
+    monkeypatch, tmp_path
+) -> None:
+    global_home = tmp_path / "global-home"
+    workspace_a = tmp_path / "workspace-a"
+    workspace_b = tmp_path / "workspace-b"
+    workspace_a.mkdir()
+    workspace_b.mkdir()
+    monkeypatch.setenv("RC_GLOBAL_HOME", str(global_home))
+
+    monkeypatch.setenv("RC_WORKING_DIR", str(workspace_a))
+    root_a = ensure_research_root()
+    remember_workspace(root_a)
+
+    monkeypatch.setenv("RC_WORKING_DIR", str(workspace_b))
+    root_b = ensure_research_root()
+    registry = remember_workspace(root_b)
+
+    registry_path = get_recent_workspaces_registry_path()
+
+    assert registry_path == global_home / "recent-workspaces.json"
+    assert load_recent_workspaces()["last_workspace"] == str(workspace_b)
+    assert get_last_workspace() == str(workspace_b)
+    assert registry["workspaces"][0] == str(workspace_b)
+    assert str(workspace_a) in registry["workspaces"]
+    assert root_a == workspace_a / ".omx" / "research"
+    assert root_b == workspace_b / ".omx" / "research"

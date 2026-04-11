@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 SCHEMA_VERSION = "1.0"
+GLOBAL_REGISTRY_VERSION = "1.0"
 CANONICAL_DIRECTORIES = (
     "onboarding",
     "goals",
@@ -62,6 +63,14 @@ def ensure_research_root() -> Path:
     root = get_research_root()
     for directory in CANONICAL_DIRECTORIES:
         (root / directory).mkdir(parents=True, exist_ok=True)
+    _atomic_write_json(
+        workspace_metadata_path(),
+        {
+            "schema_version": SCHEMA_VERSION,
+            "workspace_root": str(root),
+            "initialized_at": utc_now_iso(),
+        },
+    )
     return root
 
 
@@ -152,10 +161,11 @@ def _slugify(value: str) -> str:
     return slug or "entry"
 
 
-def _family_dir(family: str) -> Path:
+def _family_dir(family: str, *, create: bool = False) -> Path:
     if family not in FILE_BACKED_FAMILIES:
         raise ValueError(f"Unsupported research state family: {family}")
-    return ensure_research_root() / family
+    root = ensure_research_root() if create else get_research_root()
+    return root / family
 
 
 def _artifact_path(family: str, record: dict[str, Any]) -> Path:
@@ -163,11 +173,11 @@ def _artifact_path(family: str, record: dict[str, Any]) -> Path:
         key = str(record.get("key", "")).strip()
         if not key:
             raise ValueError("Context records require a key")
-        return _family_dir(family) / f"{_slugify(key)}.json"
+        return _family_dir(family, create=True) / f"{_slugify(key)}.json"
     record_id = str(record.get("id", "")).strip()
     if not record_id:
         raise ValueError(f"{family} records require an id")
-    return _family_dir(family) / f"{record_id}.json"
+    return _family_dir(family, create=True) / f"{record_id}.json"
 
 
 def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
@@ -265,7 +275,9 @@ def save_review_artifact(review_id: str, payload: dict[str, Any]) -> dict[str, A
 
 def load_records(family: str) -> list[dict[str, Any]]:
     """Load all persisted records for a family."""
-    directory = _family_dir(family)
+    directory = _family_dir(family, create=False)
+    if not directory.exists():
+        return []
     records: list[dict[str, Any]] = []
     for path in sorted(directory.glob("*.json")):
         try:
@@ -292,9 +304,97 @@ def save_record(
 
 def clear_records(family: str) -> None:
     """Remove all persisted records for a family."""
-    directory = _family_dir(family)
+    directory = _family_dir(family, create=False)
+    if not directory.exists():
+        return
     for path in directory.glob("*.json"):
         path.unlink(missing_ok=True)
+
+
+def workspace_metadata_path() -> Path:
+    """Return the workspace metadata path used to detect initialization."""
+    return get_research_root() / "workspace.json"
+
+
+def is_workspace_initialized() -> bool:
+    """Return whether the current workspace has been explicitly initialized."""
+    return workspace_metadata_path().exists()
+
+
+def initialize_workspace() -> dict[str, Any]:
+    """Initialize the current workspace and return a summary payload."""
+    already_initialized = is_workspace_initialized()
+    workspace_dir = _normalize_workspace_path(os.getenv("RC_WORKING_DIR", "."))
+    root = ensure_research_root()
+    registry = remember_workspace(workspace_dir)
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "workspace_dir": str(workspace_dir),
+        "research_root": str(root),
+        "initialized": True,
+        "already_initialized": already_initialized,
+        "directories": [str(root / directory) for directory in CANONICAL_DIRECTORIES],
+        "recent_workspaces": registry["workspaces"],
+    }
+
+
+def get_recent_workspaces_registry_path() -> Path:
+    """Return the convenience-only recent workspaces registry path."""
+    explicit_root = os.getenv("RC_GLOBAL_HOME", "").strip()
+    if explicit_root:
+        base = Path(explicit_root).expanduser().resolve()
+    else:
+        base = Path.home() / ".research-copilot"
+    base.mkdir(parents=True, exist_ok=True)
+    return base / "recent-workspaces.json"
+
+
+def load_recent_workspaces() -> dict[str, Any]:
+    """Load the convenience-only recent workspaces registry."""
+    path = get_recent_workspaces_registry_path()
+    if not path.exists():
+        return {"schema_version": GLOBAL_REGISTRY_VERSION, "last_workspace": "", "workspaces": []}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return {"schema_version": GLOBAL_REGISTRY_VERSION, "last_workspace": "", "workspaces": []}
+    workspaces = payload.get("workspaces") if isinstance(payload, dict) else []
+    if not isinstance(workspaces, list):
+        workspaces = []
+    return {
+        "schema_version": str(payload.get("schema_version") or GLOBAL_REGISTRY_VERSION)
+        if isinstance(payload, dict)
+        else GLOBAL_REGISTRY_VERSION,
+        "last_workspace": str(payload.get("last_workspace") or "") if isinstance(payload, dict) else "",
+        "workspaces": [str(item) for item in workspaces if str(item).strip()],
+    }
+
+
+def remember_workspace(root: Path | str) -> dict[str, Any]:
+    """Record a workspace in the convenience-only recent registry."""
+    normalized = str(_normalize_workspace_path(root))
+    payload = load_recent_workspaces()
+    workspaces = [workspace for workspace in payload["workspaces"] if workspace != normalized]
+    workspaces.insert(0, normalized)
+    updated = {
+        "schema_version": GLOBAL_REGISTRY_VERSION,
+        "last_workspace": normalized,
+        "workspaces": workspaces[:10],
+    }
+    _atomic_write_json(get_recent_workspaces_registry_path(), updated)
+    return updated
+
+
+def get_last_workspace() -> str:
+    """Return the last workspace path from the convenience-only registry."""
+    return str(load_recent_workspaces().get("last_workspace") or "")
+
+
+def _normalize_workspace_path(root: Path | str) -> Path:
+    candidate = Path(root).expanduser().resolve()
+    if candidate.name == "research" and candidate.parent.name == ".omx":
+        return candidate.parent.parent
+    return candidate
 
 
 class FileBackedCollection(list[dict[str, Any]]):
@@ -334,12 +434,12 @@ class FileBackedCollection(list[dict[str, Any]]):
 
 def onboarding_current_path() -> Path:
     """Return the canonical onboarding contract artifact path."""
-    return ensure_research_root() / "onboarding" / "current.json"
+    return get_research_root() / "onboarding" / "current.json"
 
 
 def onboarding_interview_path() -> Path:
     """Return the canonical onboarding transcript artifact path."""
-    return ensure_research_root() / "onboarding" / "interview.md"
+    return get_research_root() / "onboarding" / "interview.md"
 
 
 def save_onboarding_contract(

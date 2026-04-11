@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import json
+import os
+from pathlib import Path
 
 import pytest
 from click.testing import CliRunner
 
+import research_copilot.main as main_module
 from research_copilot.main import cli
 from research_copilot.mcp_servers.knowledge_base import _store
 from research_copilot.mcp_servers.slurm import MockJob, _mock_jobs
@@ -25,13 +28,95 @@ def clean_state() -> None:
 
 def test_default_cli_invocation_renders_tui_snapshot():
     runner = CliRunner()
+    with runner.isolated_filesystem():
+        init_result = runner.invoke(cli, ["init"])
+        assert init_result.exit_code == 0, init_result.output
 
-    result = runner.invoke(cli, [])
+        result = runner.invoke(cli, [])
 
     assert result.exit_code == 0
     assert "Research Copilot" in result.output
     assert "Terminal workflow dashboard" in result.output
     assert "No jobs yet" in result.output
+
+
+def test_default_cli_invocation_in_uninitialized_workspace_shows_bootstrap_not_tui(
+    monkeypatch, tmp_path
+):
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+
+    def fail_launch_tui() -> None:
+        raise AssertionError("launch_tui should not run before workspace init")
+
+    monkeypatch.setattr(main_module, "launch_tui", fail_launch_tui)
+
+    result = runner.invoke(cli, [])
+
+    assert result.exit_code == 0, result.output
+    assert "Research Copilot bootstrap" in result.output
+    assert "research-copilot init" in result.output
+
+
+def test_init_command_creates_canonical_state_and_is_idempotent(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+
+    first = runner.invoke(cli, ["init"])
+    second = runner.invoke(cli, ["init"])
+
+    research_root = tmp_path / ".omx" / "research"
+
+    assert first.exit_code == 0, first.output
+    assert second.exit_code == 0, second.output
+    assert research_root.exists()
+    assert (research_root / "workspace.json").is_file()
+    assert (research_root / "onboarding").is_dir()
+    assert (research_root / "experiments").is_dir()
+    assert (research_root / "runs").is_dir()
+
+
+def test_default_cli_invocation_opens_tui_in_initialized_workspace(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+    launch_calls: list[Path] = []
+
+    runner.invoke(cli, ["init"])
+
+    def fake_launch_tui() -> None:
+        launch_calls.append(Path.cwd())
+
+    monkeypatch.setattr(main_module, "launch_tui", fake_launch_tui)
+
+    result = runner.invoke(cli, [])
+
+    assert result.exit_code == 0, result.output
+    assert launch_calls == [tmp_path]
+
+
+def test_workspace_option_can_reopen_last_initialized_workspace(monkeypatch, tmp_path):
+    workspace_a = tmp_path / "workspace-a"
+    workspace_b = tmp_path / "workspace-b"
+    workspace_a.mkdir()
+    workspace_b.mkdir()
+
+    runner = CliRunner()
+    launch_calls: list[Path] = []
+
+    monkeypatch.chdir(workspace_a)
+    init_result = runner.invoke(cli, ["init"])
+    assert init_result.exit_code == 0, init_result.output
+
+    def fake_launch_tui() -> None:
+        launch_calls.append(Path(os.environ["RC_WORKING_DIR"]))
+
+    monkeypatch.setattr(main_module, "launch_tui", fake_launch_tui)
+    monkeypatch.chdir(workspace_b)
+
+    result = runner.invoke(cli, ["--workspace", str(workspace_a)])
+
+    assert result.exit_code == 0, result.output
+    assert launch_calls == [workspace_a.resolve()]
 
 
 
@@ -70,8 +155,8 @@ def test_tui_command_renders_seeded_workflow_views():
 
     assert result.exit_code == 0
     assert "pfn-train" in result.output
-    assert "PFN mu-weighting" in result.output
     assert "Active jobs" in result.output
+    assert "Recent experiments" in result.output
 
 
 
@@ -86,7 +171,7 @@ def test_status_and_top_level_help_reflect_terminal_first_surface(monkeypatch, t
     assert "research-copilot tui" in status_result.output
     assert "Workflow Snapshot" in status_result.output
     assert "Onboarding:" in status_result.output
-    assert "research-copilot workflow onboard" in status_result.output
+    assert "research-copilot init" in status_result.output
     assert help_result.exit_code == 0
     assert "serve" not in help_result.output
     assert "workflow" in help_result.output
@@ -96,7 +181,7 @@ def test_status_and_top_level_help_reflect_terminal_first_surface(monkeypatch, t
     assert "insights" in help_result.output
     assert "papers" in help_result.output
     assert "snapshot" in help_result.output
-    assert "workflow onboard" in help_result.output
+    assert "init" in help_result.output
     assert "cli-scenario.md" in help_result.output
 
 
@@ -155,7 +240,7 @@ def test_workflow_help_lists_named_commands():
     assert "run-experiment" in result.output
     assert "overfitting-check" in result.output
     assert "next-step" in result.output
-    assert "Start with: research-copilot workflow onboard" in result.output
+    assert "Start with: research-copilot init" in result.output
     assert "Solo proof:" in result.output
 
 
@@ -380,6 +465,50 @@ def test_onboard_workflow_json_mode_requires_explicit_fields(monkeypatch, tmp_pa
 
     assert result.exit_code != 0
     assert "JSON mode requires explicit values" in result.output
+
+
+@pytest.mark.parametrize(
+    ("argv", "expected_key"),
+    [
+        (["workflow", "triage", "--json"], "workflow"),
+        (
+            [
+                "workflow",
+                "onboard",
+                "--goal",
+                "Probe random baseline behavior",
+                "--success-criteria",
+                "Persist one reviewed run",
+                "--active-profile",
+                "goal-chaser",
+                "--autonomy-level",
+                "bounded",
+                "--allowed-action",
+                "launch runs",
+                "--constraint",
+                "single-user only",
+                "--stop-condition",
+                "stop after one reviewed run",
+                "--json",
+            ],
+            "workflow",
+        ),
+        (["workflow", "onboard-show", "--json"], "configured"),
+    ],
+)
+def test_noninteractive_commands_never_open_tui(monkeypatch, tmp_path, argv, expected_key):
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+
+    def fail_launch_tui() -> None:
+        raise AssertionError("launch_tui should not run for noninteractive commands")
+
+    monkeypatch.setattr(main_module, "launch_tui", fail_launch_tui)
+
+    result = runner.invoke(cli, argv)
+
+    assert result.exit_code == 0, result.output
+    assert expected_key in json.loads(result.output)
 
 
 def test_run_experiment_and_reasoning_commands_emit_json(monkeypatch, tmp_path):
