@@ -14,15 +14,23 @@ from datetime import datetime, timezone
 from typing import Any
 from uuid import uuid4
 
+from research_copilot.research_state import (
+    FileBackedCollection,
+    SCHEMA_VERSION,
+    apply_storage_contract,
+    build_provenance,
+    save_record,
+)
+
 # ---------------------------------------------------------------------------
-# In-memory fallback store (when PostgreSQL is not available)
+# File-backed local store (single-user MVP default)
 # ---------------------------------------------------------------------------
 
-_store: dict[str, list[dict[str, Any]]] = {
-    "experiments": [],
-    "insights": [],
-    "papers": [],
-    "context": [],
+_store: dict[str, FileBackedCollection] = {
+    "experiments": FileBackedCollection("experiments"),
+    "insights": FileBackedCollection("insights", default_content_kind="inferred"),
+    "papers": FileBackedCollection("papers"),
+    "context": FileBackedCollection("context", default_content_kind="inferred"),
 }
 
 
@@ -31,16 +39,32 @@ def _now_iso() -> str:
 
 
 def _mutation_metadata(args: dict[str, Any]) -> dict[str, Any]:
+    updated_at = _now_iso()
+    provenance = build_provenance(args, timestamp=updated_at)
     metadata = {
+        "schema_version": SCHEMA_VERSION,
         "actor_type": args.get("actor_type", ""),
         "workflow_name": args.get("workflow_name", ""),
-        "updated_at": _now_iso(),
+        "updated_at": updated_at,
+        "provenance": provenance,
     }
     if args.get("linked_experiment_id"):
         metadata["linked_experiment_id"] = args["linked_experiment_id"]
     if args.get("linked_job_id"):
         metadata["linked_job_id"] = args["linked_job_id"]
     return metadata
+
+
+def _persist_family_record(
+    family: str,
+    record: dict[str, Any],
+    *,
+    args: dict[str, Any] | None = None,
+    content_kind: str = "observed",
+) -> dict[str, Any]:
+    payload = save_record(family, record, args=args, content_kind=content_kind)
+    _store[family].refresh()
+    return payload
 
 
 # ---------------------------------------------------------------------------
