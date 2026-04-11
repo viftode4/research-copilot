@@ -23,44 +23,6 @@ The `research-copilot` command remains the main entrypoint. Non-interactive util
 2. Capture the current solo-research contract:
    ```bash
    research-copilot workflow onboard \
-     --goal "Check whether a random-data baseline is behaving sensibly" \
-     --success-criteria "Store one reviewed run with a next step" \
-     --active-profile goal-chaser \
-     --autonomy-level bounded \
-     --allowed-action "launch runs" \
-     --allowed-action "review results" \
-     --constraint "single-user only" \
-     --stop-condition "stop after one reviewed run"
-   ```
-3. Triage the current workspace and confirm the next action:
-   ```bash
-   research-copilot workflow triage --json
-   ```
-4. Run a local random-data smoke experiment and persist its artifact:
-   ```bash
-   research-copilot workflow run-experiment \
-     --name "Random baseline smoke" \
-     --command "python -c \"import json, random; rng = random.Random(7); values = [rng.random() for _ in range(8)]; print(json.dumps({'train_loss': round(sum(values[:3]) / 3, 3), 'val_loss': round(sum(values[3:6]) / 3, 3), 'test_loss': round(sum(values[5:8]) / 3, 3)}))\"" \
-     --json
-   ```
-5. Review the persisted run and generate the next step:
-   ```bash
-   research-copilot workflow overfitting-check <experiment-id> --json
-   research-copilot workflow next-step <experiment-id> --json
-   ```
-
-## Workflow references
-
-- `docs/cli-workflows.md` — workflow and ultrawork command reference, including onboarding and reasoning helpers
-- `docs/seeded-solo-cli-scenario.md` — focused smoke scenario for the seeded solo CLI path
-
-## Solo quickstart
-
-For the single-user MVP, the smoothest path is:
-
-1. Capture the research contract:
-   ```bash
-   research-copilot workflow onboard \
      --goal "Test whether random.Random() shows simple patterns" \
      --success-criteria "Persist one completed run with a review artifact" \
      --active-profile result-reasoner \
@@ -71,24 +33,27 @@ For the single-user MVP, the smoothest path is:
      --stop-condition "stop on repeated failure" \
      --json
    ```
-2. Check the next suggested action:
+3. Triage the workspace and confirm the next action:
    ```bash
    research-copilot workflow triage --json
    ```
-3. Execute a local Python experiment:
+4. Execute a local Python experiment:
    ```bash
    research-copilot workflow run-experiment \
      --name "random baseline" \
      --command "python -c \"import json, random; rng=random.Random(7); print(json.dumps({'train_loss': round(rng.random(), 3), 'val_loss': round(rng.random(), 3), 'test_loss': round(rng.random(), 3)}))\"" \
      --json
    ```
-4. Review and decide the next step:
+5. Review the run and decide the next bounded move:
    ```bash
    research-copilot workflow overfitting-check <experiment-id> --json
    research-copilot workflow next-step <experiment-id> --json
    ```
 
-For a fuller mock-backed CLI proof, see `docs/seeded-solo-cli-scenario.md`.
+## Workflow references
+
+- `docs/cli-workflows.md` — workflow and ultrawork command reference, including onboarding and reasoning helpers
+- `docs/seeded-solo-cli-scenario.md` — focused smoke scenario for the seeded solo CLI path
 
 ## Web surface removal
 

@@ -234,90 +234,90 @@ research-copilot workflow next-step <experiment-id> --json
 
 | Profile | Use when | Lanes | Expected output |
 | --- | --- | --- | --- |
-| `ops-triage` | Fast diagnosis of current state | jobs/logs, experiment/context, anomalies | State summary, blockers, next action |
-| `experiment-launch` | Preparing a new run | metadata/config, submission, safety checks | Registered experiment, submission artifact, verification notes |
-| `run-review` | Reviewing a completed run | metrics/logs, comparisons/context, insight drafting | Result summary, recommendation, saved insight |
-| `literature-context` | Gathering papers and historical context | search, relevance triage, persistence | Reading list, saved papers, context updates |
-| `incident-recovery` | Diagnosing failures | log extraction, recent deltas, rollback/fix path | Root cause summary, safe recovery options, next command |
+| `goal-chaser` | Drive a bounded loop toward a named research goal | goal/current state, experiment/run execution, review/next-step loop | Goal progress summary, blockers, next bounded action |
+| `baseline-improver` | Try to beat an existing baseline in a controlled way | baseline/context, improvement experiment path, comparison/recommendation | Comparison summary, improvement delta, keep/drop recommendation |
+| `overfit-hunter` | Diagnose and reduce overfitting | train/val/test gap inspection, regularization hypothesis path, diagnosis/next test | Overfitting diagnosis, candidate fixes, next bounded experiment |
+| `result-reasoner` | Interpret existing runs and turn them into explicit next steps | metrics/log analysis, context/baseline comparison, decision/review artifact | Result summary, decision rationale, next-step artifact |
+| `explore-improver` | Explore bounded improvements when the target is still loose | current-state exploration, candidate improvement path, result reasoning | What changed, what helped, next experiment to try |
 
 ## Ultrawork profiles
 
-### `ops-triage`
+### `goal-chaser`
 
-**Use when:** a researcher wants a fast diagnosis of the current lab state.
+**Use when:** a solo researcher has a concrete target and wants disciplined iteration.
 
 **Lanes:**
-1. jobs and logs collection
-2. experiment and context summary
-3. issues and anomalies summary
+1. goal + current-state summary
+2. experiment/run execution path
+3. review + next-step loop
 
 **Expected output:**
-- current-state summary
-- top blockers
-- suggested next action
+- goal progress summary
+- current blockers
+- next bounded action
 
-### `experiment-launch`
+### `baseline-improver`
 
-**Use when:** preparing a new run with code/config plus tracking.
+**Use when:** there is already a baseline and the next work is focused on measurable improvement.
 
 **Lanes:**
-1. experiment metadata and config validation
-2. submission script or job command preparation
-3. regression and safety checks
+1. baseline/context summary
+2. improvement experiment path
+3. comparison + recommendation
 
 **Expected output:**
-- registered experiment
-- submission artifact
-- verification notes
+- comparison summary
+- improvement delta
+- keep/drop recommendation
 
-### `run-review`
+### `overfit-hunter`
 
-**Use when:** a completed run needs structured interpretation.
+**Use when:** generalization problems are suspected and the next work should focus on overfitting signals.
 
 **Lanes:**
-1. metrics and log analysis
-2. experiment comparison and context lookup
-3. insight extraction and note drafting
+1. train/val/test gap inspection
+2. regularization/data hypothesis path
+3. overfitting diagnosis + next test
+
+**Expected output:**
+- overfitting diagnosis
+- candidate fixes
+- next bounded experiment
+
+### `result-reasoner`
+
+**Use when:** runs already exist and the main need is synthesis rather than launch.
+
+**Lanes:**
+1. metrics/log analysis
+2. context + baseline comparison
+3. decision + review artifact
 
 **Expected output:**
 - result summary
-- keep/drop recommendation
-- saved insight or context
+- decision rationale
+- next-step artifact
 
-### `literature-context`
+### `explore-improver`
 
-**Use when:** a workflow needs related papers and historical context.
-
-**Lanes:**
-1. literature search
-2. relevance triage
-3. paper and context persistence
-
-**Expected output:**
-- short reading list
-- saved papers
-- context updates
-
-### `incident-recovery`
-
-**Use when:** job failures or broken workflows need immediate diagnosis.
+**Use when:** the user wants bounded exploratory improvement for learning value, not only for a strict metric target.
 
 **Lanes:**
-1. logs and error extraction
-2. recent code or config delta review
-3. rollback or fix recommendation
+1. current-state exploration
+2. candidate improvement path
+3. result reasoning + next exploration
 
 **Expected output:**
-- root-cause summary
-- safe recovery options
-- next command to run
+- what changed
+- what helped
+- next experiment to try
 
 ## Help-text guidance
 
 These workflow and profile names should stay stable across CLI help, docs, and future MCP parity.
 
 Recommended command group labels:
-- `workflow` for the five named workflow commands
+- `workflow` for the named workflow commands
 - `ultrawork profile` for listing named presets
 - `ultrawork run <profile>` for executing a preset
 

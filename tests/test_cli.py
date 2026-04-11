@@ -75,7 +75,8 @@ def test_tui_command_renders_seeded_workflow_views():
 
 
 
-def test_status_and_top_level_help_reflect_terminal_first_surface():
+def test_status_and_top_level_help_reflect_terminal_first_surface(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
     runner = CliRunner()
 
     status_result = runner.invoke(cli, ["status"])
