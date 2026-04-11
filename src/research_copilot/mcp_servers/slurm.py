@@ -34,6 +34,9 @@ class MockJob:
     completed_at: str | None = None
     output: str = ""
     error: str = ""
+    submitted_by: str = ""
+    workflow_name: str = ""
+    experiment_id: str = ""
 
 
 _mock_jobs: dict[str, MockJob] = {}
@@ -51,6 +54,9 @@ async def handle_submit_job(args: dict[str, Any]) -> dict[str, Any]:
     partition = args.get("partition", "gpu")
     gpus = args.get("gpus", 1)
     time_limit = args.get("time_limit", "04:00:00")
+    submitted_by = args.get("submitted_by", "")
+    workflow_name = args.get("workflow_name", "")
+    experiment_id = args.get("experiment_id", "")
 
     if _mock_mode:
         job_id = str(10000 + len(_mock_jobs))
@@ -64,6 +70,9 @@ async def handle_submit_job(args: dict[str, Any]) -> dict[str, Any]:
             gpus=gpus,
             time_limit=time_limit,
             submitted_at=now,
+            submitted_by=submitted_by,
+            workflow_name=workflow_name,
+            experiment_id=experiment_id,
         )
         return {
             "content": [
@@ -77,6 +86,9 @@ async def handle_submit_job(args: dict[str, Any]) -> dict[str, Any]:
                             "partition": partition,
                             "gpus": gpus,
                             "time_limit": time_limit,
+                            "submitted_by": submitted_by,
+                            "workflow_name": workflow_name,
+                            "experiment_id": experiment_id,
                         }
                     ),
                 }
@@ -129,6 +141,9 @@ async def handle_check_job_status(args: dict[str, Any]) -> dict[str, Any]:
                             "status": job.status,
                             "partition": job.partition,
                             "gpus": job.gpus,
+                            "submitted_by": job.submitted_by,
+                            "workflow_name": job.workflow_name,
+                            "experiment_id": job.experiment_id,
                             "submitted_at": job.submitted_at,
                             "started_at": job.started_at,
                             "completed_at": job.completed_at,
@@ -162,6 +177,8 @@ async def handle_list_jobs(args: dict[str, Any]) -> dict[str, Any]:
                 "job_id": j.job_id,
                 "name": j.name,
                 "status": j.status,
+                "workflow_name": j.workflow_name,
+                "experiment_id": j.experiment_id,
                 "submitted_at": j.submitted_at,
             }
             for j in jobs

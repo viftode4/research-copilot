@@ -30,6 +30,19 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _mutation_metadata(args: dict[str, Any]) -> dict[str, Any]:
+    metadata = {
+        "actor_type": args.get("actor_type", ""),
+        "workflow_name": args.get("workflow_name", ""),
+        "updated_at": _now_iso(),
+    }
+    if args.get("linked_experiment_id"):
+        metadata["linked_experiment_id"] = args["linked_experiment_id"]
+    if args.get("linked_job_id"):
+        metadata["linked_job_id"] = args["linked_job_id"]
+    return metadata
+
+
 # ---------------------------------------------------------------------------
 # Handler functions (plain async — directly testable)
 # ---------------------------------------------------------------------------
@@ -73,6 +86,8 @@ async def handle_store_experiment(args: dict[str, Any]) -> dict[str, Any]:
         "created_by": args.get("created_by", ""),
         "created_at": _now_iso(),
         "updated_at": _now_iso(),
+        "actor_type": args.get("actor_type", ""),
+        "workflow_name": args.get("workflow_name", ""),
     }
     _store["experiments"].append(experiment)
     return {
@@ -103,6 +118,10 @@ async def handle_update_experiment(args: dict[str, Any]) -> dict[str, Any]:
             if args.get("slurm_job_id"):
                 exp["slurm_job_id"] = args["slurm_job_id"]
             exp["updated_at"] = _now_iso()
+            if args.get("actor_type"):
+                exp["actor_type"] = args["actor_type"]
+            if args.get("workflow_name"):
+                exp["workflow_name"] = args["workflow_name"]
             return {
                 "content": [
                     {"type": "text", "text": json.dumps({"id": exp_id, "message": "Updated"})}
@@ -196,6 +215,10 @@ async def handle_store_insight(args: dict[str, Any]) -> dict[str, Any]:
         "tags": tags,
         "created_by": args.get("created_by", ""),
         "created_at": _now_iso(),
+        "actor_type": args.get("actor_type", ""),
+        "workflow_name": args.get("workflow_name", ""),
+        "linked_experiment_id": args.get("linked_experiment_id", args.get("experiment_id")),
+        "linked_job_id": args.get("linked_job_id", ""),
     }
     _store["insights"].append(insight)
     return {
@@ -248,6 +271,7 @@ async def handle_set_research_context(args: dict[str, Any]) -> dict[str, Any]:
             ctx["value"] = value
             ctx["context_type"] = context_type
             ctx["updated_at"] = _now_iso()
+            ctx.update(_mutation_metadata(args))
             return {
                 "content": [
                     {"type": "text", "text": json.dumps({"key": key, "message": "Updated"})}
@@ -260,6 +284,7 @@ async def handle_set_research_context(args: dict[str, Any]) -> dict[str, Any]:
         "value": value,
         "context_type": context_type,
         "updated_at": _now_iso(),
+        **_mutation_metadata(args),
     }
     _store["context"].append(ctx_entry)
     return {
@@ -320,6 +345,8 @@ async def handle_store_paper(args: dict[str, Any]) -> dict[str, Any]:
         "relevance_notes": args.get("relevance_notes", ""),
         "tags": tags,
         "added_at": _now_iso(),
+        "actor_type": args.get("actor_type", ""),
+        "workflow_name": args.get("workflow_name", ""),
     }
     _store["papers"].append(paper)
     return {
