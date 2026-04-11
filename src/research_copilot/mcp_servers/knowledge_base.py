@@ -40,13 +40,11 @@ def _now_iso() -> str:
 
 def _mutation_metadata(args: dict[str, Any]) -> dict[str, Any]:
     updated_at = _now_iso()
-    provenance = build_provenance(args, timestamp=updated_at)
     metadata = {
         "schema_version": SCHEMA_VERSION,
         "actor_type": args.get("actor_type", ""),
         "workflow_name": args.get("workflow_name", ""),
         "updated_at": updated_at,
-        "provenance": provenance,
     }
     if args.get("linked_experiment_id"):
         metadata["linked_experiment_id"] = args["linked_experiment_id"]
@@ -95,6 +93,7 @@ async def handle_store_experiment(args: dict[str, Any]) -> dict[str, Any]:
         except json.JSONDecodeError:
             tags = [t.strip() for t in args["tags"].split(",")]
 
+    created_at = _now_iso()
     experiment = {
         "id": exp_id,
         "name": args["name"],
@@ -108,12 +107,12 @@ async def handle_store_experiment(args: dict[str, Any]) -> dict[str, Any]:
         "tags": tags,
         "wandb_run_id": args.get("wandb_run_id", ""),
         "created_by": args.get("created_by", ""),
-        "created_at": _now_iso(),
-        "updated_at": _now_iso(),
+        "created_at": created_at,
+        "updated_at": created_at,
         "actor_type": args.get("actor_type", ""),
         "workflow_name": args.get("workflow_name", ""),
     }
-    _store["experiments"].append(experiment)
+    _persist_family_record("experiments", experiment, args=args)
     return {
         "content": [
             {
@@ -146,6 +145,9 @@ async def handle_update_experiment(args: dict[str, Any]) -> dict[str, Any]:
                 exp["actor_type"] = args["actor_type"]
             if args.get("workflow_name"):
                 exp["workflow_name"] = args["workflow_name"]
+            exp["schema_version"] = SCHEMA_VERSION
+            exp["provenance"] = build_provenance(args, timestamp=exp["updated_at"])
+            _persist_family_record("experiments", exp, args=args)
             return {
                 "content": [
                     {"type": "text", "text": json.dumps({"id": exp_id, "message": "Updated"})}
@@ -229,6 +231,7 @@ async def handle_store_insight(args: dict[str, Any]) -> dict[str, Any]:
         except json.JSONDecodeError:
             tags = [t.strip() for t in args["tags"].split(",")]
 
+    created_at = _now_iso()
     insight = {
         "id": insight_id,
         "title": args["title"],
@@ -238,13 +241,13 @@ async def handle_store_insight(args: dict[str, Any]) -> dict[str, Any]:
         "confidence": args.get("confidence"),
         "tags": tags,
         "created_by": args.get("created_by", ""),
-        "created_at": _now_iso(),
+        "created_at": created_at,
         "actor_type": args.get("actor_type", ""),
         "workflow_name": args.get("workflow_name", ""),
         "linked_experiment_id": args.get("linked_experiment_id", args.get("experiment_id")),
         "linked_job_id": args.get("linked_job_id", ""),
     }
-    _store["insights"].append(insight)
+    _persist_family_record("insights", insight, args=args, content_kind="inferred")
     return {
         "content": [
             {
@@ -296,6 +299,7 @@ async def handle_set_research_context(args: dict[str, Any]) -> dict[str, Any]:
             ctx["context_type"] = context_type
             ctx["updated_at"] = _now_iso()
             ctx.update(_mutation_metadata(args))
+            _persist_family_record("context", ctx, args=args, content_kind="inferred")
             return {
                 "content": [
                     {"type": "text", "text": json.dumps({"key": key, "message": "Updated"})}
@@ -310,7 +314,7 @@ async def handle_set_research_context(args: dict[str, Any]) -> dict[str, Any]:
         "updated_at": _now_iso(),
         **_mutation_metadata(args),
     }
-    _store["context"].append(ctx_entry)
+    _persist_family_record("context", ctx_entry, args=args, content_kind="inferred")
     return {
         "content": [
             {"type": "text", "text": json.dumps({"key": key, "message": "Created"})}
@@ -358,6 +362,7 @@ async def handle_store_paper(args: dict[str, Any]) -> dict[str, Any]:
         except json.JSONDecodeError:
             tags = [t.strip() for t in args["tags"].split(",")]
 
+    added_at = _now_iso()
     paper = {
         "id": paper_id,
         "title": args["title"],
@@ -368,11 +373,11 @@ async def handle_store_paper(args: dict[str, Any]) -> dict[str, Any]:
         "url": args.get("url", ""),
         "relevance_notes": args.get("relevance_notes", ""),
         "tags": tags,
-        "added_at": _now_iso(),
+        "added_at": added_at,
         "actor_type": args.get("actor_type", ""),
         "workflow_name": args.get("workflow_name", ""),
     }
-    _store["papers"].append(paper)
+    _persist_family_record("papers", paper, args=args)
     return {
         "content": [
             {
