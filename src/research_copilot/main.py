@@ -2,15 +2,44 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
+from typing import Any
 
 import click
 
 from research_copilot.config import load_config
+from research_copilot.services.research_ops import (
+    add_insight as add_insight_service,
+    cancel_job as cancel_job_service,
+    create_experiment as create_experiment_service,
+    get_context as get_context_service,
+    get_experiment as get_experiment_service,
+    get_job as get_job_service,
+    get_job_logs as get_job_logs_service,
+    get_snapshot as get_snapshot_service,
+    list_context as list_context_service,
+    list_experiments as list_experiments_service,
+    list_insights as list_insights_service,
+    list_jobs as list_jobs_service,
+    list_papers as list_papers_service,
+    save_paper as save_paper_service,
+    search_papers as search_papers_service,
+    set_context as set_context_service,
+    submit_job as submit_job_service,
+    update_experiment as update_experiment_service,
+)
 from research_copilot.services.ultrawork import (
     build_ultrawork_run_plan,
     list_ultrawork_profiles,
+)
+from research_copilot.services.workflows import (
+    launch_experiment as launch_experiment_workflow,
+    monitor_run as monitor_run_workflow,
+    research_context as research_context_workflow,
+    review_results as review_results_workflow,
+    triage as triage_workflow,
 )
 from research_copilot.tui import launch_tui
 from research_copilot.tui.adapters import build_dashboard_snapshot
@@ -47,7 +76,10 @@ def status():
     click.echo("Integrations:")
     click.echo(f"  W&B:              {'Configured' if config.wandb.api_key else 'Not configured'}")
     click.echo(f"  Slurm:            {'Configured' if config.slurm.host else 'Mock mode'}")
-    click.echo(f"  Semantic Scholar:  {'API key set' if config.literature.semantic_scholar_api_key else 'Public (rate limited)'}")
+    click.echo(
+        "  Semantic Scholar:  "
+        f"{'API key set' if config.literature.semantic_scholar_api_key else 'Public (rate limited)'}"
+    )
     click.echo("  arXiv:             Available")
     click.echo()
     click.echo("Workflow Snapshot:")
@@ -60,18 +92,432 @@ def status():
     click.echo("Run 'research-copilot' or 'research-copilot tui' to open the terminal dashboard.")
 
 
-def _run_async(coro):
+def _run_async(coro: Any) -> Any:
     return asyncio.run(coro)
 
 
-def _emit_result(payload: dict, as_json: bool, summary: str | None = None) -> None:
+def _run_command(coro: Any) -> Any:
+    try:
+        return _run_async(coro)
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+
+def _emit_result(payload: Any, as_json: bool, summary: str | None = None) -> None:
     if as_json:
         click.echo(json.dumps(payload, indent=2, sort_keys=True, default=str))
-        return
-    if summary:
+    elif summary:
         click.echo(summary)
     else:
         click.echo(json.dumps(payload, indent=2, sort_keys=True, default=str))
+
+
+@cli.command()
+@click.option("--limit", default=5, show_default=True, type=click.IntRange(1, 50))
+@click.option("--json", "as_json", is_flag=True, help="Emit machine-readable JSON.")
+def snapshot(limit: int, as_json: bool):
+    """Show the current service-backed snapshot."""
+    payload = _run_command(get_snapshot_service(max_items=limit))
+    summary = (
+        f"Snapshot: {payload['jobs']['active']} active job(s), "
+        f"{payload['experiments']['total']} experiment(s)."
+    )
+    _emit_result(payload, as_json, summary)
+
+
+@cli.group()
+def jobs():
+    """Inspect and mutate jobs via the shared service boundary."""
+
+
+@jobs.command("list")
+@click.option("--status-filter", default="", help="Optional status filter.")
+@click.option("--limit", default=20, show_default=True, type=click.IntRange(1, 100))
+@click.option("--json", "as_json", is_flag=True, help="Emit machine-readable JSON.")
+def jobs_list(status_filter: str, limit: int, as_json: bool):
+    payload = _run_command(list_jobs_service(status_filter=status_filter, limit=limit))
+    _emit_result(payload, as_json, f"Listed {payload['total']} job(s).")
+
+
+@jobs.command("get")
+@click.argument("job_id")
+@click.option("--json", "as_json", is_flag=True, help="Emit machine-readable JSON.")
+def jobs_get(job_id: str, as_json: bool):
+    payload = _run_command(get_job_service(job_id=job_id))
+    _emit_result(payload, as_json, f"Job {payload['job_id']} is {payload['status']}." )
+
+
+@jobs.command("logs")
+@click.argument("job_id")
+@click.option("--lines", default=100, show_default=True, type=click.IntRange(1, 500))
+@click.option("--json", "as_json", is_flag=True, help="Emit machine-readable JSON.")
+def jobs_logs(job_id: str, lines: int, as_json: bool):
+    payload = _run_command(get_job_logs_service(job_id=job_id, lines=lines))
+    _emit_result(payload, as_json, f"Fetched logs for job {job_id}.")
+
+
+@jobs.command("submit")
+@click.option("--name", "job_name", required=True, help="Job name.")
+@click.option("--script", required=True, help="Submission script content.")
+@click.option("--partition", default="gpu", show_default=True)
+@click.option("--gpus", default=1, show_default=True, type=int)
+@click.option("--time-limit", default="04:00:00", show_default=True)
+@click.option("--submitted-by", default="codex", show_default=True)
+@click.option("--workflow-name", default="", help="Optional workflow provenance.")
+@click.option("--experiment-id", default="", help="Optional linked experiment id.")
+@click.option("--json", "as_json", is_flag=True, help="Emit machine-readable JSON.")
+def jobs_submit(
+    job_name: str,
+    script: str,
+    partition: str,
+    gpus: int,
+    time_limit: str,
+    submitted_by: str,
+    workflow_name: str,
+    experiment_id: str,
+    as_json: bool,
+):
+    payload = _run_command(
+        submit_job_service(
+            job_name=job_name,
+            script=script,
+            partition=partition,
+            gpus=gpus,
+            time_limit=time_limit,
+            submitted_by=submitted_by,
+            workflow_name=workflow_name,
+            experiment_id=experiment_id,
+        )
+    )
+    _emit_result(payload, as_json, f"Submitted job {payload['job_id']}." )
+
+
+@jobs.command("cancel")
+@click.argument("job_id")
+@click.option("--json", "as_json", is_flag=True, help="Emit machine-readable JSON.")
+def jobs_cancel(job_id: str, as_json: bool):
+    payload = _run_command(cancel_job_service(job_id=job_id))
+    _emit_result(payload, as_json, f"Cancelled job {job_id}.")
+
+
+@cli.group()
+def experiments():
+    """Inspect and mutate experiments via the shared service boundary."""
+
+
+@experiments.command("list")
+@click.option("--status", default="", help="Optional status filter.")
+@click.option("--dataset", default="", help="Optional dataset filter.")
+@click.option("--model-type", default="", help="Optional model filter.")
+@click.option("--tag", default="", help="Optional tag filter.")
+@click.option("--search-text", default="", help="Optional free-text search.")
+@click.option("--limit", default=20, show_default=True, type=click.IntRange(1, 100))
+@click.option("--json", "as_json", is_flag=True, help="Emit machine-readable JSON.")
+def experiments_list(
+    status: str,
+    dataset: str,
+    model_type: str,
+    tag: str,
+    search_text: str,
+    limit: int,
+    as_json: bool,
+):
+    payload = _run_command(
+        list_experiments_service(
+            status=status,
+            dataset=dataset,
+            model_type=model_type,
+            tag=tag,
+            search_text=search_text,
+            limit=limit,
+        )
+    )
+    _emit_result(payload, as_json, f"Listed {payload['total']} experiment(s).")
+
+
+@experiments.command("get")
+@click.argument("experiment_id")
+@click.option("--json", "as_json", is_flag=True, help="Emit machine-readable JSON.")
+def experiments_get(experiment_id: str, as_json: bool):
+    payload = _run_command(get_experiment_service(experiment_id=experiment_id))
+    _emit_result(payload, as_json, f"Loaded experiment {payload['id']}." )
+
+
+@experiments.command("create")
+@click.option("--name", required=True)
+@click.option("--hypothesis", default="")
+@click.option("--description", default="")
+@click.option("--config", default="", help="JSON config string.")
+@click.option("--status", default="planned", show_default=True)
+@click.option("--dataset", default="")
+@click.option("--model-type", default="")
+@click.option("--tag", "tags", multiple=True)
+@click.option("--created-by", default="codex", show_default=True)
+@click.option("--actor-type", default="codex", show_default=True)
+@click.option("--workflow-name", default="")
+@click.option("--results", default="", help="JSON results string.")
+@click.option("--json", "as_json", is_flag=True, help="Emit machine-readable JSON.")
+def experiments_create(
+    name: str,
+    hypothesis: str,
+    description: str,
+    config: str,
+    status: str,
+    dataset: str,
+    model_type: str,
+    tags: tuple[str, ...],
+    created_by: str,
+    actor_type: str,
+    workflow_name: str,
+    results: str,
+    as_json: bool,
+):
+    payload = _run_command(
+        create_experiment_service(
+            name=name,
+            hypothesis=hypothesis,
+            description=description,
+            config=config,
+            status=status,
+            dataset=dataset,
+            model_type=model_type,
+            tags=list(tags),
+            created_by=created_by,
+            actor_type=actor_type,
+            workflow_name=workflow_name,
+            results=results,
+        )
+    )
+    _emit_result(payload, as_json, f"Created experiment {payload['id']}." )
+
+
+@experiments.command("update")
+@click.argument("experiment_id")
+@click.option("--status", default="")
+@click.option("--results", default="", help="JSON results string.")
+@click.option("--wandb-run-id", default="")
+@click.option("--wandb-run-url", default="")
+@click.option("--slurm-job-id", default="")
+@click.option("--actor-type", default="codex", show_default=True)
+@click.option("--workflow-name", default="")
+@click.option("--json", "as_json", is_flag=True, help="Emit machine-readable JSON.")
+def experiments_update(
+    experiment_id: str,
+    status: str,
+    results: str,
+    wandb_run_id: str,
+    wandb_run_url: str,
+    slurm_job_id: str,
+    actor_type: str,
+    workflow_name: str,
+    as_json: bool,
+):
+    payload = _run_command(
+        update_experiment_service(
+            experiment_id=experiment_id,
+            status=status,
+            results=results,
+            wandb_run_id=wandb_run_id,
+            wandb_run_url=wandb_run_url,
+            slurm_job_id=slurm_job_id,
+            actor_type=actor_type,
+            workflow_name=workflow_name,
+        )
+    )
+    _emit_result(payload, as_json, f"Updated experiment {experiment_id}." )
+
+
+@cli.group()
+def context():
+    """Inspect and mutate research context entries."""
+
+
+@context.command("list")
+@click.option("--json", "as_json", is_flag=True, help="Emit machine-readable JSON.")
+def context_list(as_json: bool):
+    payload = _run_command(list_context_service())
+    _emit_result(payload, as_json, f"Listed {payload['total']} context entrie(s).")
+
+
+@context.command("get")
+@click.argument("key")
+@click.option("--json", "as_json", is_flag=True, help="Emit machine-readable JSON.")
+def context_get(key: str, as_json: bool):
+    payload = _run_command(get_context_service(key=key))
+    _emit_result(payload, as_json, f"Loaded context '{key}'.")
+
+
+@context.command("set")
+@click.argument("key")
+@click.option("--value", required=True)
+@click.option(
+    "--context-type",
+    default="note",
+    show_default=True,
+    type=click.Choice(["goal", "plan", "note", "reference", "constraint"], case_sensitive=False),
+)
+@click.option("--actor-type", default="codex", show_default=True)
+@click.option("--workflow-name", default="")
+@click.option("--linked-experiment-id", default="")
+@click.option("--linked-job-id", default="")
+@click.option("--json", "as_json", is_flag=True, help="Emit machine-readable JSON.")
+def context_set(
+    key: str,
+    value: str,
+    context_type: str,
+    actor_type: str,
+    workflow_name: str,
+    linked_experiment_id: str,
+    linked_job_id: str,
+    as_json: bool,
+):
+    payload = _run_command(
+        set_context_service(
+            key=key,
+            value=value,
+            context_type=context_type,
+            actor_type=actor_type,
+            workflow_name=workflow_name,
+            linked_experiment_id=linked_experiment_id,
+            linked_job_id=linked_job_id,
+        )
+    )
+    _emit_result(payload, as_json, f"Updated context '{key}'.")
+
+
+@cli.group()
+def insights():
+    """Inspect and mutate research insights."""
+
+
+@insights.command("list")
+@click.option("--category", default="")
+@click.option("--tag", default="")
+@click.option("--search-text", default="")
+@click.option("--limit", default=20, show_default=True, type=click.IntRange(1, 100))
+@click.option("--json", "as_json", is_flag=True, help="Emit machine-readable JSON.")
+def insights_list(category: str, tag: str, search_text: str, limit: int, as_json: bool):
+    payload = _run_command(
+        list_insights_service(category=category, tag=tag, search_text=search_text, limit=limit)
+    )
+    _emit_result(payload, as_json, f"Listed {payload['total']} insight(s).")
+
+
+@insights.command("add")
+@click.option("--title", required=True)
+@click.option("--content", required=True)
+@click.option(
+    "--category",
+    default="observation",
+    show_default=True,
+    type=click.Choice(["finding", "failure", "hypothesis", "technique", "observation"], case_sensitive=False),
+)
+@click.option("--experiment-id", default="")
+@click.option("--confidence", type=float, default=None)
+@click.option("--tag", "tags", multiple=True)
+@click.option("--created-by", default="codex", show_default=True)
+@click.option("--actor-type", default="codex", show_default=True)
+@click.option("--workflow-name", default="")
+@click.option("--linked-job-id", default="")
+@click.option("--json", "as_json", is_flag=True, help="Emit machine-readable JSON.")
+def insights_add(
+    title: str,
+    content: str,
+    category: str,
+    experiment_id: str,
+    confidence: float | None,
+    tags: tuple[str, ...],
+    created_by: str,
+    actor_type: str,
+    workflow_name: str,
+    linked_job_id: str,
+    as_json: bool,
+):
+    payload = _run_command(
+        add_insight_service(
+            title=title,
+            content=content,
+            category=category,
+            experiment_id=experiment_id,
+            confidence=confidence,
+            tags=list(tags),
+            created_by=created_by,
+            actor_type=actor_type,
+            workflow_name=workflow_name,
+            linked_job_id=linked_job_id,
+        )
+    )
+    _emit_result(payload, as_json, f"Stored insight {payload['id']}." )
+
+
+@cli.group()
+def papers():
+    """Search and persist literature references."""
+
+
+@papers.command("search")
+@click.argument("query")
+@click.option("--max-results", default=10, show_default=True, type=click.IntRange(1, 50))
+@click.option(
+    "--sources",
+    default="both",
+    show_default=True,
+    type=click.Choice(["arxiv", "semantic_scholar", "both"], case_sensitive=False),
+)
+@click.option("--json", "as_json", is_flag=True, help="Emit machine-readable JSON.")
+def papers_search(query: str, max_results: int, sources: str, as_json: bool):
+    payload = _run_command(search_papers_service(query=query, max_results=max_results, sources=sources))
+    _emit_result(payload, as_json, f"Found {payload['total']} paper(s).")
+
+
+@papers.command("save")
+@click.option("--title", required=True)
+@click.option("--author", "authors", multiple=True)
+@click.option("--abstract", default="")
+@click.option("--arxiv-id", default="")
+@click.option("--year", type=int, default=None)
+@click.option("--url", default="")
+@click.option("--relevance-notes", default="")
+@click.option("--tag", "tags", multiple=True)
+@click.option("--actor-type", default="codex", show_default=True)
+@click.option("--workflow-name", default="")
+@click.option("--json", "as_json", is_flag=True, help="Emit machine-readable JSON.")
+def papers_save(
+    title: str,
+    authors: tuple[str, ...],
+    abstract: str,
+    arxiv_id: str,
+    year: int | None,
+    url: str,
+    relevance_notes: str,
+    tags: tuple[str, ...],
+    actor_type: str,
+    workflow_name: str,
+    as_json: bool,
+):
+    payload = _run_command(
+        save_paper_service(
+            title=title,
+            authors=list(authors),
+            abstract=abstract,
+            arxiv_id=arxiv_id,
+            year=year,
+            url=url,
+            relevance_notes=relevance_notes,
+            tags=list(tags),
+            actor_type=actor_type,
+            workflow_name=workflow_name,
+        )
+    )
+    _emit_result(payload, as_json, f"Saved paper {payload['id']}." )
+
+
+@papers.command("list")
+@click.option("--limit", default=20, show_default=True, type=click.IntRange(1, 100))
+@click.option("--json", "as_json", is_flag=True, help="Emit machine-readable JSON.")
+def papers_list(limit: int, as_json: bool):
+    payload = _run_command(list_papers_service(limit=limit))
+    _emit_result(payload, as_json, f"Listed {payload['total']} paper(s).")
 
 
 @cli.group()
@@ -84,8 +530,7 @@ def workflow():
 @click.option("--json", "as_json", is_flag=True, help="Emit machine-readable JSON.")
 def triage(limit: int, as_json: bool):
     """Inspect current lab state and suggest the next workflow."""
-
-    payload = _run_async(triage_workflow(max_items=limit))
+    payload = _run_command(triage_workflow(max_items=limit))
     summary = (
         f"Suggested next action: {payload['suggested_next_action']}\n"
         f"Blockers: {'; '.join(payload['blockers'])}"
@@ -123,8 +568,7 @@ def launch_experiment(
     as_json: bool,
 ):
     """Register an experiment and launch its job."""
-
-    payload = _run_async(
+    payload = _run_command(
         launch_experiment_workflow(
             name=name,
             script=script,
@@ -155,14 +599,12 @@ def launch_experiment(
 @click.option("--json", "as_json", is_flag=True, help="Emit machine-readable JSON.")
 def monitor_run(identifier: str, kind: str, lines: int, as_json: bool):
     """Refresh a job or experiment and show the latest run state."""
-
-    payload = _run_async(monitor_run_workflow(identifier=identifier, kind=kind, lines=lines))
+    payload = _run_command(monitor_run_workflow(identifier=identifier, kind=kind, lines=lines))
     experiment = payload.get("experiment") or {}
     job = payload["job"]
-    summary = (
-        f"Job {job['job_id']} is {job['status']}"
-        + (f" for experiment {experiment.get('name')}" if experiment else "")
-    )
+    summary = f"Job {job['job_id']} is {job['status']}"
+    if experiment:
+        summary += f" for experiment {experiment.get('name')}"
     _emit_result(payload, as_json, summary)
 
 
@@ -191,8 +633,7 @@ def review_results(
     as_json: bool,
 ):
     """Inspect an experiment and optionally save follow-up insight/context."""
-
-    payload = _run_async(
+    payload = _run_command(
         review_results_workflow(
             experiment_id=experiment_id,
             insight_title=insight_title,
@@ -204,8 +645,8 @@ def review_results(
         )
     )
     summary = (
-        f"Reviewed experiment {payload['experiment']['name']} "
-        f"with result keys: {', '.join(payload['result_keys']) or 'none'}"
+        f"Reviewed experiment {payload['experiment']['name']} with result keys: "
+        f"{', '.join(payload['result_keys']) or 'none'}"
     )
     _emit_result(payload, as_json, summary)
 
@@ -235,8 +676,7 @@ def research_context(
     as_json: bool,
 ):
     """Search literature and update research memory."""
-
-    payload = _run_async(
+    payload = _run_command(
         research_context_workflow(
             query=query,
             max_results=max_results,
@@ -247,15 +687,12 @@ def research_context(
             context_type=context_type,
         )
     )
-    summary = f"Found {payload['papers_total']} paper(s) for '{query}'."
-    _emit_result(payload, as_json, summary)
+    _emit_result(payload, as_json, f"Found {payload['papers_total']} paper(s) for '{query}'.")
 
 
 @cli.command()
 def init_db():
     """Initialize the PostgreSQL database schema."""
-    import os
-
     migration_path = os.path.join(
         os.path.dirname(__file__), "db", "migrations", "001_initial.sql"
     )
