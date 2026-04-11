@@ -22,6 +22,19 @@ research-copilot workflow onboard \
 
 ## Scenario
 
+0. Capture the solo-user operating contract:
+   ```bash
+   research-copilot workflow onboard \
+     --goal "Validate the seeded solo PFN flow" \
+     --success-criteria "Persist one reviewed run and next step" \
+     --active-profile goal-chaser \
+     --autonomy-level bounded \
+     --allowed-action "launch runs" \
+     --constraint "single-user only" \
+     --stop-condition "stop after one reviewed run"
+   research-copilot status
+   ```
+
 1. Triage the empty workspace:
    ```bash
    research-copilot workflow triage --json
