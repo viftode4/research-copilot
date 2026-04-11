@@ -10,7 +10,6 @@ The create_slurm_server() function wraps them as MCP tools.
 
 from __future__ import annotations
 
-import asyncio
 import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -243,5 +242,4 @@ async def handle_get_job_logs(args: dict[str, Any]) -> dict[str, Any]:
         "content": [{"type": "text", "text": "Real Slurm log retrieval not yet configured."}],
         "isError": True,
     }
-
 

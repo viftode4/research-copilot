@@ -294,6 +294,7 @@ class ResearchCopilotTUI:
         info.add_column(style="bold magenta", width=16)
         info.add_column()
         info.add_row("Experiment ID", experiment.experiment_id)
+        info.add_row("Name", experiment.name)
         info.add_row("Status", experiment.status)
         info.add_row("Dataset", experiment.dataset or "—")
         info.add_row("Model", experiment.model_type or "—")

@@ -43,7 +43,7 @@ def status():
     click.echo(f"  W&B:              {'Configured' if config.wandb.api_key else 'Not configured'}")
     click.echo(f"  Slurm:            {'Configured' if config.slurm.host else 'Mock mode'}")
     click.echo(f"  Semantic Scholar:  {'API key set' if config.literature.semantic_scholar_api_key else 'Public (rate limited)'}")
-    click.echo(f"  arXiv:             Available")
+    click.echo("  arXiv:             Available")
     click.echo()
     click.echo("Workflow Snapshot:")
     click.echo(f"  Active jobs:       {snapshot.active_jobs}")

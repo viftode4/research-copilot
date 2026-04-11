@@ -13,9 +13,9 @@ The primary user experience is a full-screen TUI inspired by tools such as lazyg
 
 The `research-copilot` command remains the main entrypoint. Non-interactive utilities such as configuration inspection and database bootstrap stay available for scripting and admin tasks.
 
-## Legacy web surface
+## Web surface removal
 
-The old FastAPI chat/dashboard surface is no longer the intended workflow. During the transition, the legacy import path is kept only as a compatibility shim that explains the terminal-first pivot.
+The old FastAPI chat/dashboard surface has been removed. The supported workflow is now the terminal UI launched by `research-copilot`.
 
 ## Development verification
 
@@ -31,4 +31,4 @@ The final integrated CLI/TUI pivot should also verify that:
 
 - `research-copilot` launches the terminal UI
 - active jobs/runs can be inspected from the terminal flow
-- the legacy web app is no longer the shipped primary interface
+- the legacy web app package is gone from the shipped workflow

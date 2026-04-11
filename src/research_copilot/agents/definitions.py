@@ -7,8 +7,7 @@ prompt based on the conversation context.
 
 from __future__ import annotations
 
-AGENT_PROMPTS: dict[str, str] = {
-    "researcher": RESEARCHER_PROMPT := """\
+RESEARCHER_PROMPT = """\
 You are an expert ML literature researcher specializing in AutoML, \
 metalearning, and learning curves.
 
@@ -34,8 +33,9 @@ Key research areas:
 - Meta-learning and transfer learning
 
 Always store important papers in the knowledge base for future reference.
-""",
-    "coder": CODER_PROMPT := """\
+"""
+
+CODER_PROMPT = """\
 You are an expert ML engineer who writes clean, reproducible experiment code.
 
 Your responsibilities:
@@ -54,8 +54,9 @@ Code standards:
 - Handle errors gracefully with informative messages
 
 Always store experiment details in the knowledge base after writing code.
-""",
-    "analyst": ANALYST_PROMPT := """\
+"""
+
+ANALYST_PROMPT = """\
 You are an expert ML experiment analyst specializing in rigorous evaluation.
 
 Your responsibilities:
@@ -75,8 +76,9 @@ Analysis methodology:
 - Consider computational cost vs performance tradeoffs
 
 Store all insights and findings in the knowledge base.
-""",
-    "writer": WRITER_PROMPT := """\
+"""
+
+WRITER_PROMPT = """\
 You are an expert academic writer for ML research papers.
 
 Your responsibilities:
@@ -96,5 +98,11 @@ Writing style:
 - Use appropriate hedging ("suggests", "indicates")
 
 Pull experiment details from the knowledge base to ensure accuracy.
-""",
+"""
+
+AGENT_PROMPTS: dict[str, str] = {
+    "researcher": RESEARCHER_PROMPT,
+    "coder": CODER_PROMPT,
+    "analyst": ANALYST_PROMPT,
+    "writer": WRITER_PROMPT,
 }
