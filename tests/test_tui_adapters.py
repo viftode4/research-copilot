@@ -25,7 +25,7 @@ from research_copilot.services.workflow_snapshot import (
     build_workflow_snapshot,
     summarize_job,
 )
-from research_copilot.tui.adapters import fetch_full_run_log, load_full_job_logs
+from research_copilot.tui.adapters import fetch_full_entity_log, fetch_full_run_log, load_full_job_logs
 
 
 @pytest.fixture(autouse=True)
@@ -250,3 +250,26 @@ class TestJobSummaries:
     def test_fetch_full_run_log_rejects_non_run_entity_ids(self):
         with pytest.raises(ValueError, match="Unsupported log entity id"):
             fetch_full_run_log("experiment:exp-1", service=ResearchOpsService(store={}, jobs={}))
+
+    @pytest.mark.asyncio
+    async def test_fetch_full_entity_log_resolves_experiment_to_linked_job(self):
+        submit = await handle_submit_job(
+            {"job_name": "train-linked", "script": "#!/bin/bash\npython train.py"}
+        )
+        job_id = json.loads(submit["content"][0]["text"])["job_id"]
+        experiment = await handle_store_experiment(
+            {
+                "name": "Linked experiment",
+                "status": "running",
+                "results": '{"val_loss": 0.42}',
+            }
+        )
+        experiment_id = json.loads(experiment["content"][0]["text"])["id"]
+        await handle_update_experiment(
+            {"experiment_id": experiment_id, "slurm_job_id": job_id, "status": "running"}
+        )
+
+        record = fetch_full_entity_log(f"experiment:{experiment_id}")
+
+        assert record.entity_id == f"run:{job_id}"
+        assert record.job_id == job_id

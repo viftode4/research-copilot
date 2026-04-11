@@ -21,7 +21,7 @@ from research_copilot.tui.adapters import (
     LinkedRecord,
     PaperRecord,
     build_dashboard_snapshot,
-    fetch_full_run_log,
+    fetch_full_entity_log,
     format_timestamp,
 )
 
@@ -81,6 +81,7 @@ class ResearchCopilotTUI:
         self.show_help = False
         self.show_links_modal = False
         self.show_palette = False
+        self.palette_index = 0
         self.show_logs_modal = False
         self.filter_modes = {pane: "all" for pane in FILTER_CYCLES}
         self.sort_modes = {pane: cycle[0] for pane, cycle in SORT_CYCLES.items()}
@@ -164,6 +165,7 @@ class ResearchCopilotTUI:
                 self.show_help = False
                 self.show_links_modal = False
                 self.show_palette = False
+                self.palette_index = 0
                 self.show_logs_modal = False
                 return True
             return False
@@ -181,6 +183,7 @@ class ResearchCopilotTUI:
             return True
         if normalized in {"ctrl+p"}:
             self.show_palette = not self.show_palette
+            self.palette_index = 0
             self.show_help = False
             self.show_links_modal = False
             self.show_logs_modal = False
@@ -198,7 +201,18 @@ class ResearchCopilotTUI:
         if normalized == "l":
             self._open_logs_modal()
             return True
-        if self.show_help or self.show_links_modal or self.show_palette or self.show_logs_modal:
+        if self.show_palette:
+            if normalized in {"j", "down", "next"}:
+                self._move_palette_selection(1)
+                return True
+            if normalized in {"k", "up", "prev"}:
+                self._move_palette_selection(-1)
+                return True
+            if normalized in {"enter", "o"}:
+                self._run_palette_action()
+                return True
+            return True
+        if self.show_help or self.show_links_modal or self.show_logs_modal:
             return True
 
         if normalized in {"1", "overview"}:
@@ -668,32 +682,15 @@ class ResearchCopilotTUI:
         return Panel(table, title="Links modal", border_style="cyan")
 
     def _render_palette_modal(self) -> RenderableType:
-        entity_id = self._selected_entity_id()
-        actions = self.snapshot.actions_by_entity.get(entity_id or "", ())
-        lines = [
-            "Action palette",
-            "",
-            f"Screen: {self.current_screen}",
-            f"Pane: {self.current_pane}",
-            "",
-            "Available actions:",
-        ]
-        if actions:
-            lines.extend(f"- {action}" for action in actions)
-        else:
-            lines.append("- No contextual actions")
-        lines.extend(
-            [
-                "",
-                "Global actions:",
-                "- Refresh snapshot",
-                "- Toggle links modal",
-                "- Search current pane",
-                "- Cycle filters",
-                "- Cycle sort mode",
-            ]
-        )
-        return Panel(Text("\n".join(lines)), title="Palette", border_style="cyan")
+        entries = self._palette_entries()
+        table = Table(expand=True)
+        table.add_column("Sel", width=3)
+        table.add_column("Action", style="bold")
+        table.add_column("Description")
+        for index, entry in enumerate(entries):
+            selected = "▶" if index == self.palette_index else " "
+            table.add_row(selected, entry["label"], entry["description"])
+        return Panel(table, title="Palette", border_style="cyan")
 
     def _render_logs_modal(self) -> RenderableType:
         content = Group(
@@ -943,20 +940,21 @@ class ResearchCopilotTUI:
         return True
 
     def _open_logs_modal(self) -> None:
+        entity_id = self._selected_entity_id()
         job = self._selected_job()
-        run_entity_id = self._selected_job_entity_id()
-        if self.current_screen == "experiments" and not job:
-            experiment = self._selected_experiment()
-            if experiment and experiment.slurm_job_id:
-                for candidate in self.snapshot.jobs:
-                    if candidate.job_id == experiment.slurm_job_id:
-                        job = candidate
-                        run_entity_id = candidate.entity_id
-                        break
-        if job is None:
+        if entity_id is None and job is not None:
+            entity_id = job.entity_id
+        if entity_id is None:
             return
-        log_record = fetch_full_run_log(run_entity_id or f"run:{job.job_id}")
-        self.logs_modal_title = f"{job.name} ({job.job_id})"
+        log_record = fetch_full_entity_log(entity_id)
+        display_job = job
+        if display_job is None:
+            for candidate in self.snapshot.jobs:
+                if candidate.job_id == log_record.job_id:
+                    display_job = candidate
+                    break
+        title = display_job.name if display_job is not None else entity_id
+        self.logs_modal_title = f"{title} ({log_record.job_id})"
         self.logs_modal_stdout = log_record.stdout
         self.logs_modal_stderr = log_record.stderr
         self.show_logs_modal = True
@@ -976,6 +974,69 @@ class ResearchCopilotTUI:
                 return
         if self._selected_links():
             self.show_links_modal = True
+
+    def _palette_entries(self) -> list[dict[str, str]]:
+        pane = self._active_list_pane()
+        entries = [
+            {"action": "refresh", "label": "Refresh snapshot", "description": "Reload the current snapshot"},
+            {"action": "toggle_links", "label": "Open links modal", "description": "Inspect linked entities"},
+            {"action": "start_search", "label": "Search current pane", "description": "Type a query for the active pane"},
+            {
+                "action": "cycle_filter",
+                "label": f"Cycle filter ({self.filter_modes.get(pane, 'all')})",
+                "description": "Rotate the active filter mode",
+            },
+            {
+                "action": "cycle_sort",
+                "label": f"Cycle sort ({self.sort_modes.get(pane, 'recent')})",
+                "description": "Rotate the active sort mode",
+            },
+        ]
+        if self.current_screen in {"runs", "experiments"}:
+            entries.append(
+                {
+                    "action": "open_logs",
+                    "label": "Open full logs",
+                    "description": "Fetch full logs for the selected entity",
+                }
+            )
+        contextual = self.snapshot.actions_by_entity.get(self._selected_entity_id() or "", ())
+        entries.extend(
+            {
+                "action": "noop",
+                "label": action,
+                "description": "Contextual read-only affordance from the canonical snapshot",
+            }
+            for action in contextual
+        )
+        return entries
+
+    def _move_palette_selection(self, step: int) -> None:
+        entries = self._palette_entries()
+        if not entries:
+            self.palette_index = 0
+            return
+        self.palette_index = (self.palette_index + step) % len(entries)
+
+    def _run_palette_action(self) -> None:
+        entries = self._palette_entries()
+        if not entries:
+            return
+        action = entries[self.palette_index]["action"]
+        if action == "refresh":
+            self.refresh()
+        elif action == "toggle_links":
+            self.show_links_modal = bool(self._selected_links())
+        elif action == "start_search":
+            self.input_mode = "search"
+            self.input_buffer = self.search_queries.get(self._active_list_pane(), "")
+        elif action == "cycle_filter":
+            self._cycle_filter()
+        elif action == "cycle_sort":
+            self._cycle_sort()
+        elif action == "open_logs":
+            self._open_logs_modal()
+        self.show_palette = False
 
     def _jump_to_linked(self, entity_type: str) -> None:
         linked = _first_link_of_type(self._selected_links(), entity_type)

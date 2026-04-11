@@ -143,6 +143,27 @@ def fetch_full_run_log(
     return FullLogRecord(entity_id=entity_id, job_id=job_id, stdout=stdout, stderr=stderr)
 
 
+def fetch_full_entity_log(
+    entity_id: str,
+    *,
+    service: ResearchOpsService | None = None,
+) -> FullLogRecord:
+    """Resolve full logs from a supported entity id."""
+
+    resolved_service = service or ResearchOpsService()
+    if entity_id.startswith("run:"):
+        return fetch_full_run_log(entity_id, service=resolved_service)
+    if entity_id.startswith("experiment:"):
+        experiment_id = entity_id.removeprefix("experiment:")
+        for experiment in resolved_service.list_experiments(limit=200):
+            if experiment.experiment_id == experiment_id:
+                if not experiment.linked_job_id:
+                    raise ValueError(f"Experiment {experiment_id} does not have a linked job")
+                return fetch_full_run_log(f"run:{experiment.linked_job_id}", service=resolved_service)
+        raise ValueError(f"Experiment {experiment_id} not found")
+    raise ValueError(f"Unsupported log entity id: {entity_id}")
+
+
 @dataclass(frozen=True)
 class DashboardSnapshot:
     jobs: tuple[JobRecord, ...]

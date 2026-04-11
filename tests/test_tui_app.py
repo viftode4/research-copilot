@@ -229,19 +229,20 @@ def test_tui_search_filter_sort_and_palette_behaviors(monkeypatch):
 
     app.handle_key("\x10")
     assert app.show_palette is True
+    assert "Refresh snapshot" in _render_text(app.render())
 
 
 def test_tui_logs_modal_loads_full_logs(monkeypatch):
     monkeypatch.setattr(
-        "research_copilot.tui.app.fetch_full_run_log",
+        "research_copilot.tui.app.fetch_full_entity_log",
         lambda entity_id: type(
             "FullLogRecord",
             (),
             {
-                "entity_id": entity_id,
-                "job_id": entity_id.removeprefix("run:"),
-                "stdout": "full stdout for " + entity_id.removeprefix("run:"),
-                "stderr": "full stderr for " + entity_id.removeprefix("run:"),
+                "entity_id": "run:job-1",
+                "job_id": "job-1",
+                "stdout": "full stdout for job-1",
+                "stderr": "full stderr for job-1",
             },
         )(),
     )
@@ -252,3 +253,14 @@ def test_tui_logs_modal_loads_full_logs(monkeypatch):
 
     assert app.show_logs_modal is True
     assert "full stdout for job-1" in _render_text(app.render())
+
+
+def test_tui_palette_can_execute_actions():
+    app = ResearchCopilotTUI(snapshot_loader=_seeded_snapshot)
+
+    app.handle_key("\x10")
+    app.handle_command("j")
+    app.handle_command("j")
+    app.handle_command("enter")
+
+    assert app.input_mode == "search"
