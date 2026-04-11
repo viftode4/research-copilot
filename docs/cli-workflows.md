@@ -46,6 +46,16 @@ research-copilot migrate
 research-copilot
 ```
 
+## Dashboard interaction contract
+
+The terminal dashboard is intentionally human-facing and read-only. The current interaction split is:
+
+- **v1a core navigation:** `1-4` screen jumps, `[` / `]` screen cycling, `Tab` pane focus, `j` / `k` selection movement, `Enter` drill-down, `g` linked-research modal, `?` help, and `r` refresh.
+- **v1b read-only expansion:** pane-local search/filter/sort, richer contextual inspection, and deeper log drill-down for the selected run or experiment.
+- **Mutation boundary:** no workflow-mutating actions are introduced through the TUI in v1a or v1b; operators inspect in the dashboard and use explicit CLI/JSON commands for actual state changes.
+
+The canonical snapshot remains overview-only. It carries stable entity identity, typed links, and log summaries, but it must not embed full log bodies. When the dashboard needs deeper inspection, it resolves the selected item by stable entity ID and uses a dedicated retrieval surface for the full log payload.
+
 ### Companion usage
 
 - **Human operator:** use `research-copilot` for the TUI and `research-copilot status` for a quick readiness check.
@@ -134,6 +144,8 @@ research-copilot workflow triage --json
 - top blockers or anomalies
 - suggested next action
 
+**TUI follow-up:** after triage seeds the workspace, the human operator can open `research-copilot`, move through runs/experiments/research panes, and keep the CLI as the mutating control surface.
+
 ### `launch-experiment`
 
 **Purpose:** register and launch a new experiment safely.
@@ -185,6 +197,8 @@ research-copilot workflow monitor-run <id> --json
 - refreshed run status
 - recent log highlights
 - saved notes or operator follow-up items
+
+**TUI follow-up:** the dashboard should show log summaries directly in the runs detail pane; deeper full-log inspection remains an on-demand path and must stay outside the canonical snapshot payload.
 
 ### `review-results`
 
