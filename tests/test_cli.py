@@ -93,6 +93,8 @@ def test_status_and_top_level_help_reflect_terminal_first_surface():
     assert "insights" in help_result.output
     assert "papers" in help_result.output
     assert "snapshot" in help_result.output
+    assert "workflow onboard" in help_result.output
+    assert "docs/seeded-solo-cli-scenario.md" in help_result.output
 
 
 
@@ -112,6 +114,8 @@ def test_workflow_help_lists_named_commands():
     assert "run-experiment" in result.output
     assert "overfitting-check" in result.output
     assert "next-step" in result.output
+    assert "Start with: research-copilot workflow onboard" in result.output
+    assert "Solo proof:" in result.output
 
 
 
