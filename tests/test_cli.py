@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 from click.testing import CliRunner
 
 from research_copilot.main import cli
@@ -77,3 +79,41 @@ def test_status_and_help_reflect_terminal_first_surface():
     assert help_result.exit_code == 0
     assert "serve" not in help_result.output
     assert "tui" in help_result.output
+
+
+def test_workflow_help_lists_named_commands():
+    runner = CliRunner()
+
+    result = runner.invoke(cli, ["workflow", "--help"])
+
+    assert result.exit_code == 0
+    assert "triage" in result.output
+    assert "launch-experiment" in result.output
+    assert "monitor-run" in result.output
+    assert "review-results" in result.output
+    assert "research-context" in result.output
+
+
+def test_launch_experiment_command_emits_json_and_updates_state():
+    runner = CliRunner()
+
+    result = runner.invoke(
+        cli,
+        [
+            "workflow",
+            "launch-experiment",
+            "--name",
+            "CLI launch",
+            "--script",
+            "#!/bin/bash\npython train.py",
+            "--hypothesis",
+            "CLI flow works",
+            "--json",
+        ],
+    )
+
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+    assert payload["workflow"] == "launch-experiment"
+    assert payload["experiment"]["name"] == "CLI launch"
+    assert payload["job"]["job_id"] in _mock_jobs
