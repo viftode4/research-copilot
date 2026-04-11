@@ -8,6 +8,7 @@ build/
 .venv/
 venv/
 .env
+.research-copilot/
 .pytest_cache/
 .ruff_cache/
 htmlcov/

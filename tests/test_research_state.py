@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from research_copilot.research_state import (
     FileBackedCollection,
     build_provenance,
@@ -17,6 +19,12 @@ from research_copilot.research_state import (
     save_record,
     save_onboarding_contract,
 )
+
+
+@pytest.fixture(autouse=True)
+def clean_research_state_env(monkeypatch) -> None:
+    for variable in ("RC_RESEARCH_ROOT", "RC_WORKING_DIR", "RC_GLOBAL_HOME"):
+        monkeypatch.delenv(variable, raising=False)
 
 
 def test_save_record_uses_canonical_root_and_storage_contract(
@@ -129,7 +137,7 @@ def test_ensure_research_root_creates_canonical_directories(monkeypatch, tmp_pat
 
     root = ensure_research_root()
 
-    assert root == tmp_path / ".omx" / "research"
+    assert root == tmp_path / ".research-copilot"
     for directory in (
         "onboarding",
         "goals",
@@ -159,8 +167,8 @@ def test_get_research_root_honors_working_dir_override_for_workspace_isolation(
     monkeypatch.setenv("RC_WORKING_DIR", str(workspace_b))
     root_b = ensure_research_root()
 
-    assert root_a == workspace_a / ".omx" / "research"
-    assert root_b == workspace_b / ".omx" / "research"
+    assert root_a == workspace_a / ".research-copilot"
+    assert root_b == workspace_b / ".research-copilot"
     assert root_a != root_b
 
 
@@ -189,5 +197,65 @@ def test_recent_workspace_registry_stays_global_and_does_not_change_local_roots(
     assert get_last_workspace() == str(workspace_b)
     assert registry["workspaces"][0] == str(workspace_b)
     assert str(workspace_a) in registry["workspaces"]
-    assert root_a == workspace_a / ".omx" / "research"
-    assert root_b == workspace_b / ".omx" / "research"
+    assert root_a == workspace_a / ".research-copilot"
+    assert root_b == workspace_b / ".research-copilot"
+
+
+def test_canonical_research_root_uses_standalone_product_directory(monkeypatch, tmp_path) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("RC_WORKING_DIR", str(tmp_path))
+
+    root = ensure_research_root()
+
+    assert root == tmp_path / ".research-copilot"
+    assert (tmp_path / ".omx" / "research").exists() is False
+
+
+def test_workspace_metadata_uses_workspace_dir_not_internal_state_root(monkeypatch, tmp_path) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("RC_WORKING_DIR", str(tmp_path))
+
+    ensure_research_root()
+    workspace_metadata = json.loads((tmp_path / ".research-copilot" / "workspace.json").read_text())
+
+    assert workspace_metadata["workspace_root"] == str(tmp_path)
+
+
+def test_recent_workspace_registry_tracks_workspace_dirs_even_for_new_root(
+    monkeypatch, tmp_path
+) -> None:
+    global_home = tmp_path / "global-home"
+    workspace = tmp_path / "workspace-a"
+    workspace.mkdir()
+    monkeypatch.setenv("RC_GLOBAL_HOME", str(global_home))
+    monkeypatch.setenv("RC_WORKING_DIR", str(workspace))
+
+    root = ensure_research_root()
+    registry = remember_workspace(root)
+
+    assert root == workspace / ".research-copilot"
+    assert registry["last_workspace"] == str(workspace)
+    assert registry["workspaces"][0] == str(workspace)
+
+
+def test_legacy_omx_root_can_be_read_without_rewriting_during_transition(
+    monkeypatch, tmp_path
+) -> None:
+    workspace = tmp_path / "legacy-workspace"
+    legacy_root = workspace / ".omx" / "research"
+    (legacy_root / "onboarding").mkdir(parents=True)
+    (legacy_root / "workspace.json").write_text(
+        json.dumps({"schema_version": "1.0", "workspace_root": str(workspace)}),
+        encoding="utf-8",
+    )
+    (legacy_root / "onboarding" / "current.json").write_text(
+        json.dumps({"goal": "Legacy goal", "active_profile": "goal-chaser"}),
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(workspace)
+    monkeypatch.setenv("RC_WORKING_DIR", str(workspace))
+
+    contract = load_onboarding_contract()
+
+    assert contract["goal"] == "Legacy goal"
+    assert (workspace / ".research-copilot").exists() is False

@@ -1,6 +1,6 @@
 # Research Copilot
 
-Research Copilot is a terminal-first CLI/TUI for single-user ML research operations. The shipped MVP keeps the human dashboard in the terminal, exposes agent-safe JSON commands, and supports local research loops without a web surface.
+Research Copilot is a terminal-first, standalone CLI/TUI for single-user ML research operations. The shipped MVP keeps the human dashboard in the terminal, exposes agent-safe JSON commands, and supports local research loops without a web surface.
 
 ## Product direction
 
@@ -11,7 +11,7 @@ The primary user experience is a full-screen TUI inspired by tools such as lazyg
 - experiment status, configuration, and results
 - knowledge-base and saved-paper context in secondary views
 
-The `research-copilot` command is the canonical entrypoint. Install it once, initialize a workspace in any folder, and keep humans and agents on the same local state. Non-interactive utilities such as onboarding, workflow execution, configuration inspection, and workspace bootstrap stay available for scripting and operator automation.
+The `research-copilot` command is the canonical entrypoint. Install it once, initialize a workspace in any folder, and keep humans and agents on the same local state. The canonical local state root is `.research-copilot/`; existing `.omx/research/` workspaces are read-compatible during the transition and can be migrated with `research-copilot migrate`. Non-interactive utilities such as onboarding, workflow execution, configuration inspection, and workspace bootstrap stay available for scripting and operator automation.
 
 ## Single-user quickstart
 
@@ -24,12 +24,12 @@ The `research-copilot` command is the canonical entrypoint. Install it once, ini
    ```bash
    research-copilot init
    ```
-   This is safe in an empty folder or an existing project.
+   This is safe in an empty folder or an existing project. If you already have legacy `.omx/research/` state, run `research-copilot migrate` first or use it when prompted.
 3. Open the terminal UI:
    ```bash
    research-copilot
    ```
-4. Capture the current solo-research contract:
+4. Capture the current solo-research contract from the agent-safe surface:
    ```bash
    research-copilot workflow onboard \
      --goal "Test whether random.Random() shows simple patterns" \
@@ -42,6 +42,7 @@ The `research-copilot` command is the canonical entrypoint. Install it once, ini
      --stop-condition "stop on repeated failure" \
      --json
    ```
+   `--json` keeps the command machine-safe: no TUI, no prompts, no hidden bootstrap.
 5. Triage the workspace and confirm the next action:
    ```bash
    research-copilot workflow triage --json
@@ -64,15 +65,17 @@ The `research-copilot` command is the canonical entrypoint. Install it once, ini
 - `docs/cli-workflows.md` — canonical workflow, install, init, and agent-companion reference
 - `docs/seeded-solo-cli-scenario.md` — focused smoke scenario for the seeded solo CLI path
 
-## Web surface removal
+## Bootstrap and agent modes
 
-The old FastAPI chat/dashboard surface has been removed. The supported workflow is now the terminal UI launched by `research-copilot`.
+- **Interactive bootstrap:** run `research-copilot` in a folder. If the workspace is initialized, it opens the TUI; if not, it shows bootstrap guidance.
+- **Agent-safe mode:** run `research-copilot ... --json` from Codex, Claude Code, or shell automation. These commands stay noninteractive and operate on the same local workspace state.
+- **Legacy compatibility:** `.omx/research/` is supported during migration, but `.research-copilot/` is the canonical local state root.
 
 ## Companion usage
 
 - **Human path:** `research-copilot init` in a folder, then `research-copilot` to open the TUI.
 - **Agent path:** use `research-copilot ... --json` from Codex or Claude Code against the same folder.
-- **Workspace rule:** the local `.omx/research` state is authoritative; the terminal UI and agent commands both read and write that shared state.
+- **Workspace rule:** the local `.research-copilot/` state is authoritative; legacy `.omx/research/` workspaces are migrated or read compatibly during the transition.
 
 ## Development verification
 

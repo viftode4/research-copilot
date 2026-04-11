@@ -5,18 +5,31 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import warnings
+from dataclasses import asdict
 from typing import Any
 
 import click
+
+try:
+    from requests import RequestsDependencyWarning
+except Exception:  # pragma: no cover - optional compatibility guard
+    RequestsDependencyWarning = Warning
 
 from research_copilot.config import load_config
 from research_copilot.research_state import (
     get_last_workspace,
     get_research_root,
+    get_workspace_dir,
+    get_workspace_mode,
     initialize_workspace,
+    is_legacy_workspace,
     is_workspace_initialized,
     load_onboarding_contract,
+    migrate_workspace,
     remember_workspace,
+    resolve_workspace,
+    utc_now_iso,
 )
 from research_copilot.services.research_ops import (
     add_insight as add_insight_service,
@@ -58,6 +71,8 @@ from research_copilot.services.workflows import (
 from research_copilot.tui import launch_tui
 from research_copilot.tui.adapters import build_dashboard_snapshot
 
+warnings.filterwarnings("ignore", category=RequestsDependencyWarning)
+
 
 CLI_EPILOG = """
 Start with: research-copilot init
@@ -69,6 +84,8 @@ Start with: research-copilot init
 Then: research-copilot workflow triage --json
 Solo proof: docs/seeded-solo-cli-scenario.md
 """
+
+JSON_SCHEMA_VERSION = "1.0"
 
 def _configure_workspace(workspace: str | None) -> tuple[str, str | None]:
     target = workspace or os.getcwd()
@@ -103,6 +120,48 @@ def _emit_bootstrap_screen(workspace: str) -> None:
     click.echo("Noninteractive commands stay noninteractive; they never open the TUI unexpectedly.")
 
 
+def _emit_legacy_workspace_screen() -> None:
+    resolved = resolve_workspace()
+    click.echo("Research Copilot migration required")
+    click.echo("=" * 40)
+    click.echo(f"Workspace:    {resolved.workspace_dir}")
+    click.echo(f"Legacy root:  {resolved.legacy_root}")
+    click.echo("State:        Legacy compatibility workspace detected")
+    click.echo()
+    click.echo("Next steps:")
+    click.echo("  1. research-copilot migrate")
+    click.echo("  2. research-copilot status")
+    click.echo("  3. research-copilot workflow triage --json")
+    click.echo()
+    click.echo("Interactive commands may guide migration; machine mode stays explicit.")
+
+
+def _json_envelope(*, ok: bool, data: Any | None = None, error: dict[str, Any] | None = None) -> dict[str, Any]:
+    resolved = resolve_workspace()
+    return {
+        "schema_version": JSON_SCHEMA_VERSION,
+        "ok": ok,
+        "timestamp": utc_now_iso(),
+        "workspace": str(resolved.workspace_dir),
+        "data": data if ok else None,
+        "error": error if not ok else None,
+    }
+
+
+def _emit_error_json(*, code: str, message: str, exit_code: int = 2) -> None:
+    click.echo(json.dumps(_json_envelope(ok=False, error={"code": code, "message": message}), indent=2))
+    raise SystemExit(exit_code)
+
+
+def _guard_machine_mutation(as_json: bool) -> None:
+    if not is_legacy_workspace():
+        return
+    message = "Legacy .omx/research workspace detected. Run `research-copilot migrate` before mutating commands."
+    if as_json:
+        _emit_error_json(code="MIGRATION_REQUIRED", message=message, exit_code=4)
+    raise click.ClickException(message)
+
+
 @click.group(invoke_without_command=True, epilog=CLI_EPILOG.strip())
 @click.version_option(version="0.1.0")
 @click.option("--workspace", type=click.Path(file_okay=False, dir_okay=True, path_type=str), default=None, help="Optional workspace directory override.")
@@ -113,17 +172,20 @@ def cli(ctx: click.Context, workspace: str | None):
     ctx.call_on_close(lambda: _restore_workspace(previous_workspace))
     ctx.obj = {"workspace": resolved_workspace}
     if ctx.invoked_subcommand is None:
+        if is_legacy_workspace():
+            _emit_legacy_workspace_screen()
+            return
         if not is_workspace_initialized():
             _emit_bootstrap_screen(resolved_workspace)
             return
-        remember_workspace(get_research_root())
+        remember_workspace(get_workspace_dir())
         launch_tui()
 
 
 @cli.command()
 def tui():
     """Open the full-screen terminal workflow dashboard."""
-    remember_workspace(get_research_root())
+    remember_workspace(get_workspace_dir())
     launch_tui()
 
 
@@ -131,20 +193,67 @@ def tui():
 @click.option("--json", "as_json", is_flag=True, help="Emit machine-readable JSON.")
 def init_workspace(as_json: bool):
     """Initialize the current workspace for Research Copilot."""
+    if is_legacy_workspace() and not is_workspace_initialized():
+        message = "Legacy .omx/research workspace detected. Run `research-copilot migrate` instead of `init`."
+        if as_json:
+            _emit_error_json(code="MIGRATION_REQUIRED", message=message, exit_code=4)
+        raise click.ClickException(message)
     payload = initialize_workspace()
     summary = "Workspace already initialized." if payload["already_initialized"] else "Workspace initialized."
     _emit_result(payload, as_json, summary)
 
 
+@cli.command(name="migrate")
+@click.option("--json", "as_json", is_flag=True, help="Emit machine-readable JSON.")
+def migrate_command(as_json: bool):
+    """Migrate a legacy workspace into the standalone canonical root."""
+    try:
+        payload = migrate_workspace()
+    except ValueError as exc:
+        if as_json:
+            _emit_error_json(code="WORKSPACE_NOT_INITIALIZED", message=str(exc), exit_code=3)
+        raise click.ClickException(str(exc)) from exc
+    summary = "Workspace already uses canonical state." if payload["already_migrated"] else "Workspace migrated."
+    _emit_result(payload, as_json, summary)
+
+
 @cli.command()
-def status():
+@click.option("--json", "as_json", is_flag=True, help="Emit machine-readable JSON.")
+def status(as_json: bool):
     """Show the current configuration and connection status."""
     config = load_config()
     snapshot = build_dashboard_snapshot()
     onboarding = load_onboarding_contract()
     initialized = is_workspace_initialized()
-    workspace_dir = os.path.abspath(os.getenv("RC_WORKING_DIR", os.getcwd()))
+    workspace_mode = get_workspace_mode()
+    invocation_dir = os.path.abspath(os.getenv("RC_WORKING_DIR", os.getcwd()))
+    resolved_workspace_dir = str(resolve_workspace().workspace_dir)
     workspace_root = get_research_root()
+
+    if as_json:
+        payload = {
+            "config": {
+                "model": config.model,
+                "budget_usd": config.max_budget_usd,
+                "api_key_set": bool(os.environ.get("ANTHROPIC_API_KEY")),
+            },
+            "integrations": {
+                "wandb": bool(config.wandb.api_key),
+                "slurm": bool(config.slurm.host),
+                "semantic_scholar_api_key": bool(config.literature.semantic_scholar_api_key),
+                "arxiv": True,
+            },
+            "snapshot": asdict(snapshot),
+            "workspace": {
+                "directory": resolved_workspace_dir,
+                "invocation_directory": invocation_dir,
+                "research_root": str(workspace_root),
+                "mode": workspace_mode,
+            },
+            "onboarding": onboarding,
+        }
+        _emit_result(payload, True)
+        return
 
     click.echo("Research Copilot Configuration")
     click.echo("=" * 40)
@@ -170,9 +279,16 @@ def status():
     click.echo(f"  Stored insights:   {len(snapshot.insights)}")
     click.echo()
     click.echo("Workspace:")
-    click.echo(f"  Directory:        {workspace_dir}")
+    click.echo(f"  Directory:        {resolved_workspace_dir}")
+    if invocation_dir != resolved_workspace_dir:
+        click.echo(f"  Invoked from:     {invocation_dir}")
     click.echo(f"  Research root:    {workspace_root}")
-    click.echo(f"  State:            {'Initialized' if initialized else 'Not initialized'}")
+    state_label = {
+        "canonical": "Initialized",
+        "legacy": "Legacy compatibility",
+        "uninitialized": "Not initialized",
+    }.get(workspace_mode, "Unknown")
+    click.echo(f"  State:            {state_label}")
     click.echo()
     click.echo("Onboarding:")
     if onboarding:
@@ -182,7 +298,10 @@ def status():
         click.echo("  Next step:        research-copilot workflow triage")
     else:
         click.echo("  State:            Not configured")
-        next_step = "research-copilot workflow onboard" if initialized else "research-copilot init"
+        if workspace_mode == "legacy":
+            next_step = "research-copilot migrate"
+        else:
+            next_step = "research-copilot workflow onboard" if initialized else "research-copilot init"
         click.echo(f"  Next step:        {next_step}")
     click.echo()
     click.echo("Run 'research-copilot' or 'research-copilot tui' to open the terminal dashboard.")
@@ -201,7 +320,7 @@ def _run_command(coro: Any) -> Any:
 
 def _emit_result(payload: Any, as_json: bool, summary: str | None = None) -> None:
     if as_json:
-        click.echo(json.dumps(payload, indent=2, sort_keys=True, default=str))
+        click.echo(json.dumps(_json_envelope(ok=True, data=payload), indent=2, sort_keys=True, default=str))
     elif summary:
         click.echo(summary)
     else:
@@ -273,6 +392,7 @@ def jobs_submit(
     experiment_id: str,
     as_json: bool,
 ):
+    _guard_machine_mutation(as_json)
     payload = _run_command(
         submit_job_service(
             job_name=job_name,
@@ -292,6 +412,7 @@ def jobs_submit(
 @click.argument("job_id")
 @click.option("--json", "as_json", is_flag=True, help="Emit machine-readable JSON.")
 def jobs_cancel(job_id: str, as_json: bool):
+    _guard_machine_mutation(as_json)
     payload = _run_command(cancel_job_service(job_id=job_id))
     _emit_result(payload, as_json, f"Cancelled job {job_id}.")
 
@@ -368,6 +489,7 @@ def experiments_create(
     results: str,
     as_json: bool,
 ):
+    _guard_machine_mutation(as_json)
     payload = _run_command(
         create_experiment_service(
             name=name,
@@ -408,6 +530,7 @@ def experiments_update(
     workflow_name: str,
     as_json: bool,
 ):
+    _guard_machine_mutation(as_json)
     payload = _run_command(
         update_experiment_service(
             experiment_id=experiment_id,
@@ -467,6 +590,7 @@ def context_set(
     linked_job_id: str,
     as_json: bool,
 ):
+    _guard_machine_mutation(as_json)
     payload = _run_command(
         set_context_service(
             key=key,
@@ -529,6 +653,7 @@ def insights_add(
     linked_job_id: str,
     as_json: bool,
 ):
+    _guard_machine_mutation(as_json)
     payload = _run_command(
         add_insight_service(
             title=title,
@@ -591,6 +716,7 @@ def papers_save(
     workflow_name: str,
     as_json: bool,
 ):
+    _guard_machine_mutation(as_json)
     payload = _run_command(
         save_paper_service(
             title=title,
@@ -664,6 +790,7 @@ def launch_experiment(
     as_json: bool,
 ):
     """Register an experiment and launch its job."""
+    _guard_machine_mutation(as_json)
     payload = _run_command(
         launch_experiment_workflow(
             name=name,
@@ -729,6 +856,7 @@ def review_results(
     as_json: bool,
 ):
     """Inspect an experiment and optionally save follow-up insight/context."""
+    _guard_machine_mutation(as_json)
     payload = _run_command(
         review_results_workflow(
             experiment_id=experiment_id,
@@ -772,6 +900,7 @@ def research_context(
     as_json: bool,
 ):
     """Search literature and update research memory."""
+    _guard_machine_mutation(as_json)
     payload = _run_command(
         research_context_workflow(
             query=query,
@@ -814,6 +943,7 @@ def workflow_run_experiment(
     as_json: bool,
 ):
     """Execute a real local experiment command and persist a run artifact."""
+    _guard_machine_mutation(as_json)
     payload = _run_command(
         run_experiment_workflow(
             command=command,
@@ -903,6 +1033,7 @@ def workflow_onboard(
     as_json: bool,
 ):
     """Run the solo onboarding interview and persist the current research contract."""
+    _guard_machine_mutation(as_json)
     if as_json:
         missing = [
             name
@@ -1010,7 +1141,7 @@ def ultrawork_profile_list(as_json: bool):
     profiles = [profile.as_dict() for profile in list_ultrawork_profiles()]
 
     if as_json:
-        click.echo(json.dumps({"profiles": profiles}, indent=2))
+        click.echo(json.dumps(_json_envelope(ok=True, data={"profiles": profiles}), indent=2))
         return
 
     for profile in profiles:
@@ -1048,6 +1179,8 @@ def ultrawork_run(
     as_json: bool,
 ):
     """Emit the execution contract for a named ultrawork profile."""
+    if execute:
+        _guard_machine_mutation(as_json)
     try:
         if execute:
             contract = _run_command(
@@ -1070,7 +1203,7 @@ def ultrawork_run(
         raise click.ClickException(str(exc)) from exc
 
     if as_json:
-        click.echo(json.dumps(contract, indent=2))
+        click.echo(json.dumps(_json_envelope(ok=True, data=contract), indent=2))
         return
 
     profile = contract["profile"]

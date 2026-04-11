@@ -16,10 +16,12 @@ from research_copilot.mcp_servers.slurm import MockJob, _mock_jobs
 
 
 @pytest.fixture(autouse=True)
-def clean_state() -> None:
+def clean_state(monkeypatch) -> None:
     _mock_jobs.clear()
     for key in _store:
         _store[key].clear()
+    for variable in ("RC_RESEARCH_ROOT", "RC_WORKING_DIR", "RC_GLOBAL_HOME"):
+        monkeypatch.delenv(variable, raising=False)
     yield
     _mock_jobs.clear()
     for key in _store:
@@ -65,7 +67,7 @@ def test_init_command_creates_canonical_state_and_is_idempotent(monkeypatch, tmp
     first = runner.invoke(cli, ["init"])
     second = runner.invoke(cli, ["init"])
 
-    research_root = tmp_path / ".omx" / "research"
+    research_root = tmp_path / ".research-copilot"
 
     assert first.exit_code == 0, first.output
     assert second.exit_code == 0, second.output
@@ -117,6 +119,151 @@ def test_workspace_option_can_reopen_last_initialized_workspace(monkeypatch, tmp
 
     assert result.exit_code == 0, result.output
     assert launch_calls == [workspace_a.resolve()]
+
+
+def test_read_only_json_commands_can_use_legacy_workspace_without_forcing_migration(
+    monkeypatch, tmp_path
+):
+    workspace = tmp_path / "legacy-workspace"
+    legacy_root = workspace / ".omx" / "research"
+    (legacy_root / "onboarding").mkdir(parents=True)
+    (legacy_root / "workspace.json").write_text(
+        json.dumps({"schema_version": "1.0", "workspace_root": str(workspace)}),
+        encoding="utf-8",
+    )
+    (legacy_root / "onboarding" / "current.json").write_text(
+        json.dumps(
+            {
+                "schema_version": "1.0",
+                "goal": "Read legacy workspace",
+                "active_profile": "goal-chaser",
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(workspace)
+    runner = CliRunner()
+
+    result = runner.invoke(cli, ["workflow", "onboard-show", "--json"])
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["data"]["configured"] is True
+    assert payload["data"]["contract"]["goal"] == "Read legacy workspace"
+    assert (workspace / ".research-copilot").exists() is False
+
+
+def test_mutating_json_commands_on_legacy_only_workspace_require_migration(
+    monkeypatch, tmp_path
+):
+    workspace = tmp_path / "legacy-workspace"
+    legacy_root = workspace / ".omx" / "research"
+    (legacy_root / "onboarding").mkdir(parents=True)
+    (legacy_root / "workspace.json").write_text(
+        json.dumps({"schema_version": "1.0", "workspace_root": str(workspace)}),
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(workspace)
+    runner = CliRunner()
+
+    result = runner.invoke(
+        cli,
+        [
+            "workflow",
+            "onboard",
+            "--goal",
+            "Mutating legacy workspace",
+            "--success-criteria",
+            "Require migration first",
+            "--active-profile",
+            "goal-chaser",
+            "--autonomy-level",
+            "bounded",
+            "--allowed-action",
+            "run local experiments",
+            "--constraint",
+            "single-user only",
+            "--stop-condition",
+            "stop on repeated failure",
+            "--json",
+        ],
+    )
+
+    assert result.exit_code != 0
+    payload = json.loads(result.output)
+    assert payload["ok"] is False
+    assert payload["error"]["code"] == "MIGRATION_REQUIRED"
+    assert payload["workspace"] == str(workspace)
+
+
+def test_migrate_command_promotes_legacy_workspace_to_canonical_root(monkeypatch, tmp_path):
+    workspace = tmp_path / "legacy-workspace"
+    legacy_root = workspace / ".omx" / "research"
+    (legacy_root / "onboarding").mkdir(parents=True)
+    (legacy_root / "workspace.json").write_text(
+        json.dumps({"schema_version": "1.0", "workspace_root": str(workspace)}),
+        encoding="utf-8",
+    )
+    (legacy_root / "onboarding" / "current.json").write_text(
+        json.dumps({"goal": "Migrate me", "active_profile": "goal-chaser"}),
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(workspace)
+    runner = CliRunner()
+
+    result = runner.invoke(cli, ["migrate", "--json"])
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["ok"] is True
+    assert payload["workspace"] == str(workspace)
+    assert (workspace / ".research-copilot" / "workspace.json").is_file()
+    assert json.loads((workspace / ".research-copilot" / "onboarding" / "current.json").read_text())["goal"] == "Migrate me"
+
+
+def test_workspace_option_wins_over_current_directory_discovery(monkeypatch, tmp_path):
+    workspace_a = tmp_path / "workspace-a"
+    workspace_b = tmp_path / "workspace-b"
+    subdir = workspace_b / "nested" / "child"
+    workspace_a.mkdir()
+    subdir.mkdir(parents=True)
+    (workspace_a / ".research-copilot" / "onboarding").mkdir(parents=True)
+    (workspace_a / ".research-copilot" / "workspace.json").write_text(
+        json.dumps({"schema_version": "1.0", "workspace_root": str(workspace_a)}),
+        encoding="utf-8",
+    )
+    (workspace_a / ".research-copilot" / "onboarding" / "current.json").write_text(
+        json.dumps({"goal": "Workspace A", "active_profile": "goal-chaser"}),
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(subdir)
+    runner = CliRunner()
+
+    result = runner.invoke(cli, ["--workspace", str(workspace_a), "workflow", "onboard-show", "--json"])
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["data"]["contract"]["goal"] == "Workspace A"
+
+
+def test_json_mode_keeps_stdout_machine_parseable_even_when_warnings_fire(
+    monkeypatch, tmp_path
+):
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+
+    async def warn_and_return(*_args, **_kwargs):
+        import warnings
+
+        warnings.warn("noise that must not pollute stdout", UserWarning)
+        return {"configured": False, "message": "No onboarding contract saved yet.", "contract": {}}
+
+    monkeypatch.setattr(main_module, "onboarding_summary_workflow", warn_and_return)
+
+    result = runner.invoke(cli, ["workflow", "onboard-show", "--json"])
+
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.output)["data"]["configured"] is False
 
 
 
@@ -262,7 +409,7 @@ def test_snapshot_and_job_commands_emit_json():
             "--json",
         ],
     )
-    submit_payload = json.loads(submit_result.output)
+    submit_payload = json.loads(submit_result.output)["data"]
 
     list_result = runner.invoke(cli, ["jobs", "list", "--json"])
     get_result = runner.invoke(cli, ["jobs", "get", submit_payload["job_id"], "--json"])
@@ -273,15 +420,15 @@ def test_snapshot_and_job_commands_emit_json():
     assert submit_result.exit_code == 0
     assert submit_payload["job_id"] in _mock_jobs
     assert list_result.exit_code == 0
-    assert json.loads(list_result.output)["total"] == 1
+    assert json.loads(list_result.output)["data"]["total"] == 1
     assert get_result.exit_code == 0
-    assert json.loads(get_result.output)["name"] == "CLI job"
+    assert json.loads(get_result.output)["data"]["name"] == "CLI job"
     assert logs_result.exit_code == 0
-    assert json.loads(logs_result.output)["job_id"] == submit_payload["job_id"]
+    assert json.loads(logs_result.output)["data"]["job_id"] == submit_payload["job_id"]
     assert snapshot_result.exit_code == 0
-    assert json.loads(snapshot_result.output)["jobs"]["total"] == 1
+    assert json.loads(snapshot_result.output)["data"]["jobs"]["total"] == 1
     assert cancel_result.exit_code == 0
-    assert json.loads(cancel_result.output)["status"] == "CANCELLED"
+    assert json.loads(cancel_result.output)["data"]["status"] == "CANCELLED"
 
 
 
@@ -304,7 +451,7 @@ def test_experiments_context_and_insights_commands_emit_json():
             "--json",
         ],
     )
-    create_payload = json.loads(create_result.output)
+    create_payload = json.loads(create_result.output)["data"]
     experiment_id = create_payload["id"]
 
     update_result = runner.invoke(
@@ -346,16 +493,16 @@ def test_experiments_context_and_insights_commands_emit_json():
 
     assert create_result.exit_code == 0
     assert update_result.exit_code == 0
-    assert json.loads(update_result.output)["message"] == "Updated"
+    assert json.loads(update_result.output)["data"]["message"] == "Updated"
     assert get_result.exit_code == 0
-    assert json.loads(get_result.output)["status"] == "running"
+    assert json.loads(get_result.output)["data"]["status"] == "running"
     assert list_result.exit_code == 0
-    assert json.loads(list_result.output)["total"] == 1
+    assert json.loads(list_result.output)["data"]["total"] == 1
     assert context_set.exit_code == 0
-    assert json.loads(context_get.output)["value"] == "Ship CLI surface"
-    assert json.loads(context_list.output)["total"] == 1
+    assert json.loads(context_get.output)["data"]["value"] == "Ship CLI surface"
+    assert json.loads(context_list.output)["data"]["total"] == 1
     assert insight_add.exit_code == 0
-    assert json.loads(insight_list.output)["total"] == 1
+    assert json.loads(insight_list.output)["data"]["total"] == 1
 
 
 
@@ -394,11 +541,11 @@ def test_paper_commands_emit_json(monkeypatch):
     search_result = runner.invoke(cli, ["papers", "search", "pfn", "--json"])
 
     assert save_result.exit_code == 0
-    assert json.loads(save_result.output)["id"]
+    assert json.loads(save_result.output)["data"]["id"]
     assert list_result.exit_code == 0
-    assert json.loads(list_result.output)["total"] == 1
+    assert json.loads(list_result.output)["data"]["total"] == 1
     assert search_result.exit_code == 0
-    assert json.loads(search_result.output)["total"] == 1
+    assert json.loads(search_result.output)["data"]["total"] == 1
 
 
 
@@ -422,9 +569,9 @@ def test_launch_experiment_command_emits_json_and_updates_state():
 
     assert result.exit_code == 0
     payload = json.loads(result.output)
-    assert payload["workflow"] == "launch-experiment"
-    assert payload["experiment"]["name"] == "CLI launch"
-    assert payload["job"]["job_id"] in _mock_jobs
+    assert payload["data"]["workflow"] == "launch-experiment"
+    assert payload["data"]["experiment"]["name"] == "CLI launch"
+    assert payload["data"]["job"]["job_id"] in _mock_jobs
 
 
 def test_onboard_workflow_can_prompt_and_show_saved_contract(monkeypatch, tmp_path):
@@ -452,9 +599,9 @@ def test_onboard_workflow_can_prompt_and_show_saved_contract(monkeypatch, tmp_pa
     show_result = runner.invoke(cli, ["workflow", "onboard-show", "--json"])
     assert show_result.exit_code == 0
     show_payload = json.loads(show_result.output)
-    assert show_payload["configured"] is True
-    assert show_payload["contract"]["goal"] == "Test whether random.Random() shows simple patterns"
-    assert show_payload["contract"]["active_profile"] == "overfit-hunter"
+    assert show_payload["data"]["configured"] is True
+    assert show_payload["data"]["contract"]["goal"] == "Test whether random.Random() shows simple patterns"
+    assert show_payload["data"]["contract"]["active_profile"] == "overfit-hunter"
 
 
 def test_onboard_workflow_json_mode_requires_explicit_fields(monkeypatch, tmp_path):
@@ -508,7 +655,7 @@ def test_noninteractive_commands_never_open_tui(monkeypatch, tmp_path, argv, exp
     result = runner.invoke(cli, argv)
 
     assert result.exit_code == 0, result.output
-    assert expected_key in json.loads(result.output)
+    assert expected_key in json.loads(result.output)["data"]
 
 
 def test_run_experiment_and_reasoning_commands_emit_json(monkeypatch, tmp_path):
@@ -528,7 +675,7 @@ def test_run_experiment_and_reasoning_commands_emit_json(monkeypatch, tmp_path):
         ],
     )
     assert run_result.exit_code == 0, run_result.output
-    run_payload = json.loads(run_result.output)
+    run_payload = json.loads(run_result.output)["data"]
     experiment_id = run_payload["experiment"]["id"]
     assert run_payload["run"]["status"] == "completed"
 
@@ -543,8 +690,8 @@ def test_run_experiment_and_reasoning_commands_emit_json(monkeypatch, tmp_path):
 
     assert overfit_result.exit_code == 0
     assert next_step_result.exit_code == 0
-    assert json.loads(overfit_result.output)["review"]["score_gaps"]["validation_gap"] == pytest.approx(0.04)
-    assert json.loads(next_step_result.output)["review"]["suggestions"]
+    assert json.loads(overfit_result.output)["data"]["review"]["score_gaps"]["validation_gap"] == pytest.approx(0.04)
+    assert json.loads(next_step_result.output)["data"]["review"]["suggestions"]
 
 
 def test_ultrawork_run_can_execute_active_onboarding_profile(monkeypatch, tmp_path):
@@ -593,7 +740,7 @@ def test_ultrawork_run_can_execute_active_onboarding_profile(monkeypatch, tmp_pa
     )
 
     assert run_result.exit_code == 0, run_result.output
-    payload = json.loads(run_result.output)
+    payload = json.loads(run_result.output)["data"]
     assert payload["status"] == "completed"
     assert payload["profile"]["name"] == "overfit-hunter"
     assert payload["steps"][1]["step"] == "overfitting-check"

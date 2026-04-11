@@ -2,12 +2,19 @@
 
 This example documents the single-operator CLI flow covered by `tests/test_cli_solo_scenario.py`.
 It stays CLI-only, uses the in-memory mock backends, and proves the current MVP flow without a DB,
-web surface, or multi-user coordination.
+web surface, or multi-user coordination. The canonical workspace state is `.research-copilot/`;
+legacy `.omx/research/` workspaces can be migrated with `research-copilot migrate`.
 
 Start every workspace with the canonical bootstrap command:
 
 ```bash
 research-copilot init
+```
+
+If this is an older MVP workspace, migrate it once before continuing:
+
+```bash
+research-copilot migrate
 ```
 
 Before running the seeded mock flow, the recommended onboarding command for the local
@@ -25,6 +32,10 @@ research-copilot workflow onboard \
   --stop-condition "stop on repeated failure" \
   --json
 ```
+This agent-safe form stays noninteractive: it does not open the TUI or prompt for input.
+
+For humans, the bare `research-copilot` command is the interactive bootstrap/dashboard entrypoint:
+it opens the TUI when initialized, or shows bootstrap guidance when the workspace is empty.
 
 ## Scenario
 

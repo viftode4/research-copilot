@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -12,6 +13,10 @@ from typing import Any
 
 SCHEMA_VERSION = "1.0"
 GLOBAL_REGISTRY_VERSION = "1.0"
+JSON_SCHEMA_VERSION = "1.0"
+NEW_STATE_DIRNAME = ".research-copilot"
+LEGACY_STATE_DIRNAME = ".omx"
+LEGACY_RESEARCH_SUBDIR = "research"
 CANONICAL_DIRECTORIES = (
     "onboarding",
     "goals",
@@ -44,30 +49,120 @@ class ResearchStatePaths:
     insights: Path
 
 
+@dataclass(frozen=True)
+class WorkspaceResolution:
+    """Resolved workspace + state-root information."""
+
+    workspace_dir: Path
+    canonical_root: Path
+    legacy_root: Path
+    active_root: Path | None
+    mode: str
+
+
 def utc_now_iso() -> str:
     """Return the current UTC timestamp in ISO-8601 format."""
     return datetime.now(timezone.utc).isoformat()
 
 
+def get_workspace_dir() -> Path:
+    """Resolve the current workspace directory target."""
+    explicit_root = os.getenv("RC_WORKING_DIR", "").strip()
+    target = explicit_root or "."
+    return Path(target).expanduser().resolve()
+
+
+def _canonical_root_for_workspace(workspace_dir: Path) -> Path:
+    return workspace_dir / NEW_STATE_DIRNAME
+
+
+def _legacy_root_for_workspace(workspace_dir: Path) -> Path:
+    return workspace_dir / LEGACY_STATE_DIRNAME / LEGACY_RESEARCH_SUBDIR
+
+
+def resolve_workspace(start: Path | None = None) -> WorkspaceResolution:
+    """Resolve workspace discovery for canonical and legacy state roots."""
+    current = (start or get_workspace_dir()).resolve()
+    search_chain: list[Path] = [current]
+    git_root: Path | None = None
+    home_dir = Path.home().resolve()
+    for candidate in (current, *current.parents):
+        if (candidate / ".git").exists():
+            git_root = candidate
+            break
+    if git_root is not None:
+        walker = current
+        while True:
+            if walker not in search_chain:
+                search_chain.append(walker)
+            if walker == git_root:
+                break
+            walker = walker.parent
+    else:
+        walker = current.parent
+        while True:
+            if current != home_dir and walker == home_dir:
+                break
+            if walker not in search_chain:
+                search_chain.append(walker)
+            if walker == walker.parent:
+                break
+            walker = walker.parent
+
+    for candidate in search_chain:
+        canonical_root = _canonical_root_for_workspace(candidate)
+        legacy_root = _legacy_root_for_workspace(candidate)
+        if canonical_root.exists():
+            return WorkspaceResolution(
+                workspace_dir=candidate,
+                canonical_root=canonical_root,
+                legacy_root=legacy_root,
+                active_root=canonical_root,
+                mode="canonical",
+            )
+        if legacy_root.exists():
+            return WorkspaceResolution(
+                workspace_dir=candidate,
+                canonical_root=canonical_root,
+                legacy_root=legacy_root,
+                active_root=legacy_root,
+                mode="legacy",
+            )
+
+    workspace_dir = current
+    return WorkspaceResolution(
+        workspace_dir=workspace_dir,
+        canonical_root=_canonical_root_for_workspace(workspace_dir),
+        legacy_root=_legacy_root_for_workspace(workspace_dir),
+        active_root=None,
+        mode="uninitialized",
+    )
+
+
 def get_research_root() -> Path:
-    """Resolve the canonical local research state root."""
-    explicit_root = os.getenv("RC_RESEARCH_ROOT", "").strip()
-    if explicit_root:
-        return Path(explicit_root).expanduser().resolve()
-    working_dir = Path(os.getenv("RC_WORKING_DIR", ".")).expanduser()
-    return (working_dir / ".omx" / "research").resolve()
+    """Return the active or canonical research state root for the current workspace."""
+    resolved = resolve_workspace()
+    return resolved.active_root or resolved.canonical_root
+
+
+def get_workspace_mode() -> str:
+    """Return the current workspace mode: canonical, legacy, or uninitialized."""
+    return resolve_workspace().mode
 
 
 def ensure_research_root() -> Path:
     """Ensure the research root and canonical directories exist."""
-    root = get_research_root()
+    resolved = resolve_workspace()
+    root = resolved.canonical_root
     for directory in CANONICAL_DIRECTORIES:
         (root / directory).mkdir(parents=True, exist_ok=True)
     _atomic_write_json(
         workspace_metadata_path(),
         {
             "schema_version": SCHEMA_VERSION,
-            "workspace_root": str(root),
+            "workspace_dir": str(resolved.workspace_dir),
+            "workspace_root": str(resolved.workspace_dir),
+            "research_root": str(root),
             "initialized_at": utc_now_iso(),
         },
     )
@@ -229,7 +324,7 @@ def save_run_artifact(
     stderr: str = "",
     metrics: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Persist a run artifact bundle under `.omx/research/runs/<run-id>/`."""
+    """Persist a run artifact bundle under the canonical workspace state root."""
     run_dir = _artifact_dir("runs") / _slugify(run_id)
     run_dir.mkdir(parents=True, exist_ok=True)
     _atomic_write_json(run_dir / "status.json", payload)
@@ -269,7 +364,7 @@ def load_run_artifact(run_id: str) -> dict[str, Any]:
 
 
 def save_review_artifact(review_id: str, payload: dict[str, Any]) -> dict[str, Any]:
-    """Persist a structured review artifact under `.omx/research/reviews/`."""
+    """Persist a structured review artifact under the canonical workspace state root."""
     return save_named_artifact("reviews", review_id, payload)
 
 
@@ -313,12 +408,12 @@ def clear_records(family: str) -> None:
 
 def workspace_metadata_path() -> Path:
     """Return the workspace metadata path used to detect initialization."""
-    return get_research_root() / "workspace.json"
+    return resolve_workspace().canonical_root / "workspace.json"
 
 
 def is_workspace_initialized() -> bool:
     """Return whether the current workspace has been explicitly initialized."""
-    return workspace_metadata_path().exists()
+    return resolve_workspace().mode == "canonical"
 
 
 def initialize_workspace() -> dict[str, Any]:
@@ -394,7 +489,61 @@ def _normalize_workspace_path(root: Path | str) -> Path:
     candidate = Path(root).expanduser().resolve()
     if candidate.name == "research" and candidate.parent.name == ".omx":
         return candidate.parent.parent
+    if candidate.name == NEW_STATE_DIRNAME:
+        return candidate.parent
     return candidate
+
+
+def is_legacy_workspace() -> bool:
+    """Return whether the current workspace is legacy-only."""
+    return resolve_workspace().mode == "legacy"
+
+
+def migrate_workspace() -> dict[str, Any]:
+    """Migrate a legacy workspace into the canonical standalone root."""
+    resolved = resolve_workspace()
+    if resolved.mode == "canonical":
+        registry = remember_workspace(resolved.workspace_dir)
+        return {
+            "schema_version": SCHEMA_VERSION,
+            "migrated": False,
+            "already_migrated": True,
+            "workspace_dir": str(resolved.workspace_dir),
+            "research_root": str(resolved.canonical_root),
+            "legacy_root": str(resolved.legacy_root),
+            "recent_workspaces": registry["workspaces"],
+        }
+    if resolved.mode != "legacy":
+        raise ValueError("No legacy workspace was found to migrate.")
+
+    staging_root = resolved.workspace_dir / f"{NEW_STATE_DIRNAME}.staging"
+    if staging_root.exists():
+        shutil.rmtree(staging_root)
+    shutil.copytree(resolved.legacy_root, staging_root)
+    _atomic_write_json(
+        staging_root / "workspace.json",
+        {
+            "schema_version": SCHEMA_VERSION,
+            "workspace_dir": str(resolved.workspace_dir),
+            "research_root": str(resolved.canonical_root),
+            "migrated_from": str(resolved.legacy_root),
+            "migrated_at": utc_now_iso(),
+        },
+    )
+    if resolved.canonical_root.exists():
+        shutil.rmtree(staging_root)
+    else:
+        staging_root.replace(resolved.canonical_root)
+    registry = remember_workspace(resolved.workspace_dir)
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "migrated": True,
+        "already_migrated": False,
+        "workspace_dir": str(resolved.workspace_dir),
+        "research_root": str(resolved.canonical_root),
+        "legacy_root": str(resolved.legacy_root),
+        "recent_workspaces": registry["workspaces"],
+    }
 
 
 class FileBackedCollection(list[dict[str, Any]]):

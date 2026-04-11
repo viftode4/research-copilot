@@ -43,7 +43,8 @@ async def _fake_search(args: dict[str, object]) -> dict[str, object]:
 def _invoke_json(runner: CliRunner, args: list[str]) -> dict[str, object]:
     result: Result = runner.invoke(cli, [*args, "--json"])
     assert result.exit_code == 0, result.output
-    return json.loads(result.output)
+    payload = json.loads(result.output)
+    return payload["data"]
 
 
 def test_seeded_solo_cli_flow_covers_research_launch_monitor_and_review(

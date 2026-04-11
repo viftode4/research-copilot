@@ -1,18 +1,19 @@
 # CLI Workflows and Ultrawork Profiles
 
-This document captures the CLI-facing workflow contract from `.omx/plans/prd-cli-research-ops-control-plane.md`.
-It is the operator and agent reference for the planned workflow commands and ultrawork profile names.
+This document captures the CLI-facing workflow contract for the standalone Research Copilot MVP.
+It is the operator and agent reference for the workflow commands and ultrawork profile names.
 
-`research-copilot` is the canonical command. Install it once, run `research-copilot init` in any folder, and keep the workspace-local `.omx/research` state authoritative. Humans can open the TUI with the bare command; Codex and Claude should use `--json` subcommands against the same workspace.
+`research-copilot` is the canonical command. Install it once, run `research-copilot init` in any folder, and keep the workspace-local `.research-copilot/` state authoritative. Existing `.omx/research/` workspaces are compatible during the transition and can be migrated with `research-copilot migrate`. Humans can open the TUI with the bare command; Codex and Claude should use `--json` subcommands against the same workspace.
 
 ## Workflow model
 
 Research Copilot keeps a split interface:
 
 - `research-copilot init` bootstraps the current folder for local use.
-- `research-copilot` opens the human TUI dashboard.
+- `research-copilot migrate` moves legacy `.omx/research/` state into the standalone layout.
+- `research-copilot` opens the human TUI dashboard or bootstrap view.
 - `research-copilot status` is the human-readable readiness check for onboarding + next-step guidance.
-- `research-copilot ... --json` is the stable agent-facing surface.
+- `research-copilot ... --json` is the stable agent-facing surface and never opens the TUI.
 - Named workflows package common multi-step research-ops tasks into explicit commands.
 - `research-copilot workflow onboard` persists the current single-user operating contract before autonomous work begins.
 - Ultrawork profiles package repeatable parallel execution patterns with named lanes and expected outputs.
@@ -33,6 +34,12 @@ Run this in an empty folder or an existing project:
 research-copilot init
 ```
 
+If you are upgrading from the earlier MVP, migrate legacy state once:
+
+```bash
+research-copilot migrate
+```
+
 ### Open the terminal UI
 
 ```bash
@@ -43,7 +50,7 @@ research-copilot
 
 - **Human operator:** use `research-copilot` for the TUI and `research-copilot status` for a quick readiness check.
 - **Codex / Claude companion:** use `research-copilot workflow ... --json` from a second terminal or agent pane.
-- **Shared state:** both paths read and write the same local `.omx/research` files.
+- **Shared state:** both paths read and write the same local `.research-copilot/` files; `.omx/research/` is a legacy compatibility input.
 
 Unless a section says otherwise, the examples below assume the workspace has already been initialized once with `research-copilot init`.
 
@@ -51,7 +58,8 @@ Unless a section says otherwise, the examples below assume the workspace has alr
 
 | Command | Purpose | Primary CLI surface | Expected outcome |
 | --- | --- | --- | --- |
-| `init` | Bootstrap the current folder for local use | `research-copilot init` | Created or confirmed `.omx/research` workspace state |
+| `init` | Bootstrap the current folder for local use | `research-copilot init` | Created or confirmed `.research-copilot/` workspace state |
+| `migrate` | Move legacy state into the standalone layout | `research-copilot migrate` | Legacy `.omx/research/` imported into `.research-copilot/` |
 
 ## Workflow command summary
 
@@ -95,7 +103,7 @@ research-copilot status
 ```
 
 **Expected output:**
-- initialized local workspace state
+- initialized local workspace state under `.research-copilot/`
 - saved onboarding contract
 - clear goal/profile summary
 - next command suggestions such as `workflow triage`
@@ -121,7 +129,7 @@ research-copilot workflow triage --json
 ```
 
 **Expected output:**
-- initialized local workspace state
+- initialized local workspace state under `.research-copilot/`
 - current-state summary
 - top blockers or anomalies
 - suggested next action
@@ -147,7 +155,7 @@ research-copilot workflow launch-experiment ... --json
 ```
 
 **Expected output:**
-- initialized local workspace state
+- initialized local workspace state under `.research-copilot/`
 - registered experiment
 - submission artifact or job identifier
 - verification notes for the launch
@@ -173,7 +181,7 @@ research-copilot workflow monitor-run <id> --json
 ```
 
 **Expected output:**
-- initialized local workspace state
+- initialized local workspace state under `.research-copilot/`
 - refreshed run status
 - recent log highlights
 - saved notes or operator follow-up items
@@ -199,7 +207,7 @@ research-copilot workflow review-results <id> --json
 ```
 
 **Expected output:**
-- initialized local workspace state
+- initialized local workspace state under `.research-copilot/`
 - result summary
 - keep/drop recommendation
 - saved insight or context record
@@ -225,7 +233,7 @@ research-copilot workflow research-context <query> --json
 ```
 
 **Expected output:**
-- initialized local workspace state
+- initialized local workspace state under `.research-copilot/`
 - short reading list
 - saved papers
 - updated context or notes
@@ -253,7 +261,7 @@ research-copilot workflow next-step <experiment-id> --json
 ```
 
 **Expected output:**
-- initialized local workspace state
+- initialized local workspace state under `.research-copilot/`
 - persisted run artifact
 - metrics ready for review
 - explicit next-step recommendation
