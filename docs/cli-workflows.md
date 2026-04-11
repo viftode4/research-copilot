@@ -51,10 +51,10 @@ research-copilot
 The terminal dashboard is intentionally human-facing and read-only. The current interaction split is:
 
 - **v1a core navigation:** `1-4` screen jumps, `[` / `]` screen cycling, `Tab` pane focus, `j` / `k` selection movement, `Enter` drill-down, `g` linked-research modal, `?` help, and `r` refresh.
-- **v1b read-only expansion:** pane-local search/filter/sort, richer contextual inspection, and deeper log drill-down for the selected run or experiment.
+- **v1b read-only expansion:** pane-local search/filter/sort, an actionable read-only palette, richer contextual inspection, and deeper log drill-down for the selected run or experiment.
 - **Mutation boundary:** no workflow-mutating actions are introduced through the TUI in v1a or v1b; operators inspect in the dashboard and use explicit CLI/JSON commands for actual state changes.
 
-The canonical snapshot remains overview-only. It carries stable entity identity, typed links, and log summaries, but it must not embed full log bodies. When the dashboard needs deeper inspection, it resolves the selected item by stable entity ID and uses a dedicated retrieval surface for the full log payload.
+The canonical snapshot remains overview-only. It carries stable entity identity, typed links, and log summaries, but it must not embed full log bodies. When the dashboard needs deeper inspection, it resolves the selected run or linked experiment by stable entity ID and uses a dedicated retrieval surface for the full log payload.
 
 ### Companion usage
 

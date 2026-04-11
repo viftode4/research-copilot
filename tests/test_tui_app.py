@@ -120,8 +120,8 @@ def _seeded_snapshot() -> DashboardSnapshot:
             ),
         },
         actions_by_entity={
-            "run:job-1": ("Open log summary",),
-            "experiment:exp-1": ("Open linked research",),
+            "run:job-1": ("Open links", "Open full logs"),
+            "experiment:exp-1": ("Open linked research", "Open full logs"),
         },
         schema_version="1.0.0",
         snapshot_owner="workflow_snapshot_service",
@@ -239,10 +239,10 @@ def test_tui_logs_modal_loads_full_logs(monkeypatch):
             "FullLogRecord",
             (),
             {
-                "entity_id": "run:job-1",
-                "job_id": "job-1",
-                "stdout": "full stdout for job-1",
-                "stderr": "full stderr for job-1",
+                "entity_id": entity_id,
+                "job_id": entity_id.removeprefix("run:"),
+                "stdout": "full stdout for " + entity_id.removeprefix("run:"),
+                "stderr": "full stderr for " + entity_id.removeprefix("run:"),
             },
         )(),
     )
@@ -255,12 +255,44 @@ def test_tui_logs_modal_loads_full_logs(monkeypatch):
     assert "full stdout for job-1" in _render_text(app.render())
 
 
-def test_tui_palette_can_execute_actions():
+def test_tui_palette_executes_read_only_action(monkeypatch):
+    seen: list[str] = []
+
+    def fake_fetch(entity_id: str):
+        seen.append(entity_id)
+        return type(
+            "FullLogRecord",
+            (),
+            {
+                "entity_id": entity_id,
+                "job_id": "job-1",
+                "stdout": f"full stdout for {entity_id}",
+                "stderr": f"full stderr for {entity_id}",
+            },
+        )()
+
+    monkeypatch.setattr("research_copilot.tui.app.fetch_full_entity_log", fake_fetch)
     app = ResearchCopilotTUI(snapshot_loader=_seeded_snapshot)
 
+    app.handle_command("3")
     app.handle_key("\x10")
-    app.handle_command("j")
+    assert "Open full logs" in _render_text(app.render())
+
     app.handle_command("j")
     app.handle_command("enter")
 
-    assert app.input_mode == "search"
+    assert seen == ["experiment:exp-1"]
+    assert app.show_logs_modal is True
+    assert "full stdout for experiment:exp-1" in _render_text(app.render())
+
+
+def test_tui_palette_can_execute_direct_shortcuts():
+    app = ResearchCopilotTUI(snapshot_loader=_seeded_snapshot)
+
+    app.handle_command("3")
+    app.handle_key("\x10")
+    app.handle_command("p")
+
+    assert app.show_palette is False
+    assert app.current_screen == "research"
+    assert app.current_pane == "papers"

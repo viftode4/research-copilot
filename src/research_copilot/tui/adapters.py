@@ -155,13 +155,27 @@ def fetch_full_entity_log(
         return fetch_full_run_log(entity_id, service=resolved_service)
     if entity_id.startswith("experiment:"):
         experiment_id = entity_id.removeprefix("experiment:")
-        for experiment in resolved_service.list_experiments(limit=200):
-            if experiment.experiment_id == experiment_id:
-                if not experiment.linked_job_id:
-                    raise ValueError(f"Experiment {experiment_id} does not have a linked job")
-                return fetch_full_run_log(f"run:{experiment.linked_job_id}", service=resolved_service)
-        raise ValueError(f"Experiment {experiment_id} not found")
+        experiment = resolved_service.get_experiment(experiment_id)
+        if not experiment.linked_job_id:
+            raise ValueError(f"Experiment {experiment_id} does not have a linked job and has no linked run logs")
+        stdout, stderr = load_full_job_logs(experiment.linked_job_id, service=resolved_service)
+        return FullLogRecord(
+            entity_id=entity_id,
+            job_id=experiment.linked_job_id,
+            stdout=stdout,
+            stderr=stderr,
+        )
     raise ValueError(f"Unsupported log entity id: {entity_id}")
+
+
+def fetch_full_log(
+    entity_id: str,
+    *,
+    service: ResearchOpsService | None = None,
+) -> FullLogRecord:
+    """Backward-compatible alias for full-log resolution by stable entity id."""
+
+    return fetch_full_entity_log(entity_id, service=service)
 
 
 @dataclass(frozen=True)
@@ -248,7 +262,11 @@ def _build_links_index(snapshot: dict[str, Any]) -> dict[str, tuple[LinkedRecord
 def _build_actions_index(snapshot: dict[str, Any]) -> dict[str, tuple[str, ...]]:
     actions_by_entity: dict[str, list[str]] = defaultdict(list)
     for action in snapshot["actions"]:
-        if action.get("enabled"):
+        if (
+            action.get("enabled")
+            and action.get("safety_level") == "read_only"
+            and action.get("scope") == "tui_affordance"
+        ):
             actions_by_entity[action["target_entity_id"]].append(action["label"])
     return {entity_id: tuple(labels) for entity_id, labels in actions_by_entity.items()}
 

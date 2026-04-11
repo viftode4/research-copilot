@@ -188,6 +188,32 @@ def _normalize_results(value: Any) -> dict[str, Any]:
     return {"raw": value}
 
 
+def _experiment_state(
+    experiment: Mapping[str, Any],
+    *,
+    jobs: Mapping[str, MockJob],
+) -> ExperimentState:
+    linked_job_id = str(experiment.get("slurm_job_id") or "") or None
+    linked_job = jobs.get(linked_job_id or "")
+    return ExperimentState(
+        experiment_id=str(experiment.get("id", "")),
+        name=str(experiment.get("name", "")),
+        status=str(experiment.get("status", "unknown")),
+        hypothesis=str(experiment.get("hypothesis", "")),
+        description=str(experiment.get("description", "")),
+        dataset=str(experiment.get("dataset", "")),
+        model_type=str(experiment.get("model_type", "")),
+        tags=tuple(experiment.get("tags", [])),
+        created_at=str(experiment.get("created_at", "")),
+        updated_at=str(experiment.get("updated_at", experiment.get("created_at", ""))),
+        results=_normalize_results(experiment.get("results", {})),
+        wandb_run_id=str(experiment.get("wandb_run_id", "")),
+        linked_job_id=linked_job_id,
+        linked_job_status=linked_job.status if linked_job else None,
+        is_active=str(experiment.get("status", "")).lower() in ACTIVE_EXPERIMENT_STATUSES,
+    )
+
+
 class ResearchOpsService:
     """Read-mostly service boundary over current in-memory stores."""
 
@@ -247,30 +273,13 @@ class ResearchOpsService:
 
     def list_experiments(self, *, limit: int = 20) -> tuple[ExperimentState, ...]:
         raw_experiments = sorted(self._store.get("experiments", []), key=_experiment_sort_key, reverse=True)
-        items: list[ExperimentState] = []
-        for experiment in raw_experiments[:limit]:
-            linked_job_id = str(experiment.get("slurm_job_id") or "") or None
-            linked_job = self._jobs.get(linked_job_id or "")
-            items.append(
-                ExperimentState(
-                    experiment_id=str(experiment.get("id", "")),
-                    name=str(experiment.get("name", "")),
-                    status=str(experiment.get("status", "unknown")),
-                    hypothesis=str(experiment.get("hypothesis", "")),
-                    description=str(experiment.get("description", "")),
-                    dataset=str(experiment.get("dataset", "")),
-                    model_type=str(experiment.get("model_type", "")),
-                    tags=tuple(experiment.get("tags", [])),
-                    created_at=str(experiment.get("created_at", "")),
-                    updated_at=str(experiment.get("updated_at", experiment.get("created_at", ""))),
-                    results=_normalize_results(experiment.get("results", {})),
-                    wandb_run_id=str(experiment.get("wandb_run_id", "")),
-                    linked_job_id=linked_job_id,
-                    linked_job_status=linked_job.status if linked_job else None,
-                    is_active=str(experiment.get("status", "")).lower() in ACTIVE_EXPERIMENT_STATUSES,
-                )
-            )
-        return tuple(items)
+        return tuple(_experiment_state(experiment, jobs=self._jobs) for experiment in raw_experiments[:limit])
+
+    def get_experiment(self, experiment_id: str) -> ExperimentState:
+        for experiment in self._store.get("experiments", []):
+            if str(experiment.get("id", "")) == experiment_id:
+                return _experiment_state(experiment, jobs=self._jobs)
+        raise ValueError(f"Experiment {experiment_id} not found")
 
     def snapshot(
         self,

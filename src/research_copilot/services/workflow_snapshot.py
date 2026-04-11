@@ -245,7 +245,7 @@ def _job_entities(
         actions.append(
             {
                 "action_id": f"log-summary:{run_entity_id}",
-                "label": "Open log summary",
+                "label": "Open full logs",
                 "tier": 0,
                 "safety_level": "read_only",
                 "enabled": True,
@@ -254,7 +254,7 @@ def _job_entities(
                     "required_statuses": [],
                     "required_links": ["run_to_job"],
                     "required_capabilities": [],
-                    "notes": "Uses in-snapshot log summaries only in v1a.",
+                    "notes": "Resolves full logs on demand from the stable run entity id.",
                 },
                 "target_entity_id": run_entity_id,
                 "scope": "tui_affordance",
@@ -299,6 +299,24 @@ def _experiment_entities(state_experiments: Sequence[Any]) -> tuple[list[dict[st
                     "target_id": linked_run_entity_id,
                     "link_type": "experiment_to_run",
                     "directionality": "directed",
+                }
+            )
+            actions.append(
+                {
+                    "action_id": f"log-summary:{experiment_entity_id}",
+                    "label": "Open full logs",
+                    "tier": 0,
+                    "safety_level": "read_only",
+                    "enabled": True,
+                    "disabled_reason": "",
+                    "preconditions": {
+                        "required_statuses": [],
+                        "required_links": ["experiment_to_run"],
+                        "required_capabilities": [],
+                        "notes": "Resolves full logs from the experiment entity's linked run.",
+                    },
+                    "target_entity_id": experiment_entity_id,
+                    "scope": "tui_affordance",
                 }
             )
         actions.append(

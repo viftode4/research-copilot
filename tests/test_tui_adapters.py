@@ -247,9 +247,9 @@ class TestJobSummaries:
         assert "epoch=0" in full_log.stdout
         assert full_log.stderr == "stderr line"
 
-    def test_fetch_full_run_log_rejects_non_run_entity_ids(self):
+    def test_fetch_full_entity_log_rejects_unknown_entity_ids(self):
         with pytest.raises(ValueError, match="Unsupported log entity id"):
-            fetch_full_run_log("experiment:exp-1", service=ResearchOpsService(store={}, jobs={}))
+            fetch_full_entity_log("paper:pap-1", service=ResearchOpsService(store={}, jobs={}))
 
     @pytest.mark.asyncio
     async def test_fetch_full_entity_log_resolves_experiment_to_linked_job(self):
@@ -271,5 +271,14 @@ class TestJobSummaries:
 
         record = fetch_full_entity_log(f"experiment:{experiment_id}")
 
-        assert record.entity_id == f"run:{job_id}"
+        assert record.entity_id == f"experiment:{experiment_id}"
         assert record.job_id == job_id
+
+    @pytest.mark.asyncio
+    async def test_fetch_full_entity_log_rejects_experiment_without_linked_run(self):
+        experiment = await handle_store_experiment({"name": "Unlinked experiment", "status": "planned"})
+        experiment_id = json.loads(experiment["content"][0]["text"])["id"]
+
+        with pytest.raises(ValueError, match="has no linked run logs"):
+            fetch_full_entity_log(f"experiment:{experiment_id}")
+

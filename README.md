@@ -72,10 +72,10 @@ The `research-copilot` command is the canonical entrypoint. Install it once, ini
 The terminal dashboard stays human-facing and read-only:
 
 - **v1a baseline:** screen switching, pane focus, selection movement, linked-research drill-down, help, refresh, and log summaries.
-- **v1b read-only expansion:** search/filter/sort per pane, richer contextual inspection, and full-log drill-down for the selected run without embedding full logs into the canonical snapshot.
+- **v1b read-only expansion:** search/filter/sort per pane, an actionable read-only palette, richer contextual inspection, and full-log drill-down for the selected run or experiment without embedding full logs into the canonical snapshot.
 - **Safety boundary:** no mutating workflow actions ship through the TUI in v1a or v1b; agents should keep using `research-copilot ... --json` and durable workspace artifacts.
 
-The canonical snapshot remains the source of truth for overview data. When deeper inspection is needed, the TUI resolves the selected item by stable entity identity and uses dedicated retrieval flows for full logs rather than stuffing raw log bodies into machine-facing snapshot JSON.
+The canonical snapshot remains the source of truth for overview data. When deeper inspection is needed, the TUI resolves the selected run or linked experiment by stable entity identity and uses dedicated retrieval flows for full logs rather than stuffing raw log bodies into machine-facing snapshot JSON.
 
 ## Bootstrap and agent modes
 
