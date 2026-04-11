@@ -2,42 +2,35 @@
 
 from __future__ import annotations
 
+import os
+
 import click
 
 from research_copilot.config import load_config
+from research_copilot.tui import launch_tui
+from research_copilot.tui.adapters import build_dashboard_snapshot
 
 
-@click.group()
+@click.group(invoke_without_command=True)
 @click.version_option(version="0.1.0")
-def cli():
-    """Research Copilot — AI-powered research assistant for ML research labs."""
-    pass
+@click.pass_context
+def cli(ctx: click.Context):
+    """Research Copilot — terminal workflow dashboard for ML research labs."""
+    if ctx.invoked_subcommand is None:
+        launch_tui()
 
 
 @cli.command()
-@click.option("--host", default="0.0.0.0", help="Host to bind to")
-@click.option("--port", default=8000, type=int, help="Port to serve on")
-@click.option("--reload", is_flag=True, help="Enable auto-reload for development")
-def serve(host: str, port: int, reload: bool):
-    """Start the web server (default mode)."""
-    import uvicorn
-
-    click.echo(f"Starting Research Copilot on http://{host}:{port}")
-    click.echo("Press Ctrl+C to stop.\n")
-    uvicorn.run(
-        "research_copilot.web.app:app",
-        host=host,
-        port=port,
-        reload=reload,
-    )
+def tui():
+    """Open the full-screen terminal workflow dashboard."""
+    launch_tui()
 
 
 @cli.command()
 def status():
     """Show the current configuration and connection status."""
-    import os
-
     config = load_config()
+    snapshot = build_dashboard_snapshot()
 
     click.echo("Research Copilot Configuration")
     click.echo("=" * 40)
@@ -52,7 +45,14 @@ def status():
     click.echo(f"  Semantic Scholar:  {'API key set' if config.literature.semantic_scholar_api_key else 'Public (rate limited)'}")
     click.echo(f"  arXiv:             Available")
     click.echo()
-    click.echo("Run 'research-copilot serve' to start the web interface.")
+    click.echo("Workflow Snapshot:")
+    click.echo(f"  Active jobs:       {snapshot.active_jobs}")
+    click.echo(f"  Tracked jobs:      {len(snapshot.jobs)}")
+    click.echo(f"  Experiments:       {len(snapshot.experiments)}")
+    click.echo(f"  Saved papers:      {len(snapshot.papers)}")
+    click.echo(f"  Stored insights:   {len(snapshot.insights)}")
+    click.echo()
+    click.echo("Run 'research-copilot' or 'research-copilot tui' to open the terminal dashboard.")
 
 
 @cli.command()
