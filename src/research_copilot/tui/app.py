@@ -21,6 +21,7 @@ from research_copilot.tui.adapters import (
     LinkedRecord,
     PaperRecord,
     build_dashboard_snapshot,
+    fetch_full_run_log,
     format_timestamp,
 )
 
@@ -37,7 +38,23 @@ PANE_ORDER = {
     "experiments": ("experiments", "links"),
     "research": ("insights", "papers", "context"),
 }
-COMMAND_HINT = "1-4 views • [/] cycle • Tab panes • j/k move • Enter open • g links • ? help • r refresh • q back • Q quit"
+COMMAND_HINT = "1-4 views • [/] cycle • Tab panes • j/k move • / search • f filter • s sort • l logs • g links • Ctrl+P palette • ? help • r refresh • q back • Q quit"
+
+FILTER_CYCLES = {
+    "runs": ("all", "active", "completed", "failed"),
+    "experiments": ("all", "running", "completed", "failed"),
+    "insights": ("all", "finding", "observation"),
+    "papers": ("all", "recent"),
+    "context": ("all", "goal", "note"),
+}
+
+SORT_CYCLES = {
+    "runs": ("recent", "name", "status"),
+    "experiments": ("recent", "name", "status"),
+    "insights": ("recent", "title", "confidence"),
+    "papers": ("recent", "title", "year"),
+    "context": ("recent", "key", "type"),
+}
 
 
 def _first_link_of_type(links: tuple[LinkedRecord, ...], entity_type: str) -> LinkedRecord | None:
@@ -63,6 +80,16 @@ class ResearchCopilotTUI:
         self.selected_context_index = 0
         self.show_help = False
         self.show_links_modal = False
+        self.show_palette = False
+        self.show_logs_modal = False
+        self.filter_modes = {pane: "all" for pane in FILTER_CYCLES}
+        self.sort_modes = {pane: cycle[0] for pane, cycle in SORT_CYCLES.items()}
+        self.search_queries = {pane: "" for pane in SORT_CYCLES}
+        self.input_mode = ""
+        self.input_buffer = ""
+        self.logs_modal_title = ""
+        self.logs_modal_stdout = ""
+        self.logs_modal_stderr = ""
         self.snapshot = self.snapshot_loader()
         self.refresh()
 
@@ -94,6 +121,8 @@ class ResearchCopilotTUI:
         self.screen_index = SCREEN_ORDER.index(name)
         self.pane_indexes[name] = min(self.pane_indexes[name], len(PANE_ORDER[name]) - 1)
         self.show_links_modal = False
+        self.show_palette = False
+        self.show_logs_modal = False
 
     def cycle_screen(self, step: int) -> None:
         self.screen_index = (self.screen_index + step) % len(SCREEN_ORDER)
@@ -121,26 +150,55 @@ class ResearchCopilotTUI:
 
     def handle_key(self, key: str) -> bool:
         raw = key or ""
+        if raw == "\x10":
+            raw = "ctrl+p"
         if raw == "Q":
             return False
         normalized = raw.strip().lower()
+        if self.input_mode == "search":
+            return self._handle_search_input(raw, normalized)
         if normalized == "":
             return True
         if normalized == "q":
-            if self.show_help or self.show_links_modal:
+            if self.show_help or self.show_links_modal or self.show_palette or self.show_logs_modal:
                 self.show_help = False
                 self.show_links_modal = False
+                self.show_palette = False
+                self.show_logs_modal = False
                 return True
             return False
         if normalized in {"?", "help"}:
             self.show_help = not self.show_help
             self.show_links_modal = False
+            self.show_palette = False
+            self.show_logs_modal = False
             return True
         if normalized == "g":
             self.show_links_modal = bool(self._selected_links())
             self.show_help = False
+            self.show_palette = False
+            self.show_logs_modal = False
             return True
-        if self.show_help or self.show_links_modal:
+        if normalized in {"ctrl+p"}:
+            self.show_palette = not self.show_palette
+            self.show_help = False
+            self.show_links_modal = False
+            self.show_logs_modal = False
+            return True
+        if normalized == "/":
+            self.input_mode = "search"
+            self.input_buffer = self.search_queries.get(self._active_list_pane(), "")
+            return True
+        if normalized == "f":
+            self._cycle_filter()
+            return True
+        if normalized == "s":
+            self._cycle_sort()
+            return True
+        if normalized == "l":
+            self._open_logs_modal()
+            return True
+        if self.show_help or self.show_links_modal or self.show_palette or self.show_logs_modal:
             return True
 
         if normalized in {"1", "overview"}:
@@ -151,9 +209,9 @@ class ResearchCopilotTUI:
             self.set_screen("experiments")
         elif normalized in {"4", "research", "knowledge"}:
             self.set_screen("research")
-        elif normalized in {"[", "h", "left"}:
+        elif normalized in {"[", "left"}:
             self.cycle_screen(-1)
-        elif normalized in {"]", "l", "right"}:
+        elif normalized in {"]", "right"}:
             self.cycle_screen(1)
         elif normalized == "tab":
             self.cycle_pane(1)
@@ -241,6 +299,10 @@ class ResearchCopilotTUI:
             return self._render_help_modal()
         if self.show_links_modal:
             return self._render_links_modal()
+        if self.show_palette:
+            return self._render_palette_modal()
+        if self.show_logs_modal:
+            return self._render_logs_modal()
         if self.current_screen == "overview":
             return self._render_overview()
         if self.current_screen == "runs":
@@ -363,7 +425,8 @@ class ResearchCopilotTUI:
         return layout
 
     def _render_jobs_table(self, limit: int) -> RenderableType:
-        if not self.snapshot.jobs:
+        jobs = self._visible_jobs()
+        if not jobs:
             return Text("No runs yet. Submit or sync a run to monitor it here.", style="dim")
 
         table = Table(expand=True)
@@ -372,7 +435,7 @@ class ResearchCopilotTUI:
         table.add_column("Status")
         table.add_column("GPU", justify="right", width=5)
         table.add_column("Submitted", width=16)
-        for index, job in enumerate(self.snapshot.jobs[:limit]):
+        for index, job in enumerate(jobs[:limit]):
             selected = "▶" if index == self.selected_job_index else " "
             table.add_row(
                 selected,
@@ -384,7 +447,8 @@ class ResearchCopilotTUI:
         return table
 
     def _render_experiments_table(self, limit: int) -> RenderableType:
-        if not self.snapshot.experiments:
+        experiments = self._visible_experiments()
+        if not experiments:
             return Text("No experiments tracked yet. Store one to populate this view.", style="dim")
 
         table = Table(expand=True)
@@ -393,7 +457,7 @@ class ResearchCopilotTUI:
         table.add_column("Status")
         table.add_column("Dataset")
         table.add_column("Updated", width=16)
-        for index, experiment in enumerate(self.snapshot.experiments[:limit]):
+        for index, experiment in enumerate(experiments[:limit]):
             selected = "▶" if index == self.selected_experiment_index else " "
             table.add_row(
                 selected,
@@ -454,27 +518,29 @@ class ResearchCopilotTUI:
         )
 
     def _render_insights_table(self) -> RenderableType:
-        if not self.snapshot.insights:
+        insights = self._visible_insights()
+        if not insights:
             return Text("No insights captured yet.", style="dim")
         table = Table(expand=True)
         table.add_column("Sel", width=3)
         table.add_column("Title", style="bold")
         table.add_column("Category")
         table.add_column("Confidence", justify="right")
-        for index, insight in enumerate(self.snapshot.insights):
+        for index, insight in enumerate(insights):
             selected = "▶" if index == self.selected_insight_index else " "
             table.add_row(selected, insight.title, insight.category, insight.confidence)
         return table
 
     def _render_papers_table(self) -> RenderableType:
-        if not self.snapshot.papers:
+        papers = self._visible_papers()
+        if not papers:
             return Text("No saved papers yet.", style="dim")
         table = Table(expand=True)
         table.add_column("Sel", width=3)
         table.add_column("Title", style="bold")
         table.add_column("Authors")
         table.add_column("Year", width=6)
-        for index, paper in enumerate(self.snapshot.papers):
+        for index, paper in enumerate(papers):
             selected = "▶" if index == self.selected_paper_index else " "
             authors = ", ".join(paper.authors[:2]) if paper.authors else "—"
             if len(paper.authors) > 2:
@@ -483,14 +549,15 @@ class ResearchCopilotTUI:
         return table
 
     def _render_context_table(self) -> RenderableType:
-        if not self.snapshot.context_entries:
+        context_entries = self._visible_context_entries()
+        if not context_entries:
             return Text("No research context stored yet.", style="dim")
         table = Table(expand=True)
         table.add_column("Sel", width=3)
         table.add_column("Key", style="bold")
         table.add_column("Type")
         table.add_column("Value")
-        for index, context in enumerate(self.snapshot.context_entries):
+        for index, context in enumerate(context_entries):
             selected = "▶" if index == self.selected_context_index else " "
             value = context.value[:48] + ("…" if len(context.value) > 48 else "")
             table.add_row(selected, context.key, context.context_type, value)
@@ -568,12 +635,17 @@ class ResearchCopilotTUI:
 
     def _render_help_modal(self) -> RenderableType:
         help_lines = Group(
-            Text("v1a key bindings", style="bold"),
+            Text("v1b key bindings", style="bold"),
             Text("1-4 switch screens"),
             Text("[ / ] cycle screens"),
             Text("Tab cycle panes"),
             Text("j / k move selection"),
             Text("Enter or o open focused item"),
+            Text("/ start search"),
+            Text("f cycle filter"),
+            Text("s cycle sort"),
+            Text("l open full logs on runs/experiments"),
+            Text("Ctrl+P open action palette"),
             Text("g open links modal"),
             Text("e / p / i / c jump to linked experiment / papers / insights / context"),
             Text("r refresh"),
@@ -595,10 +667,59 @@ class ResearchCopilotTUI:
             table.add_row(link.entity_type, link.relation, link.title, link.status or "—")
         return Panel(table, title="Links modal", border_style="cyan")
 
+    def _render_palette_modal(self) -> RenderableType:
+        entity_id = self._selected_entity_id()
+        actions = self.snapshot.actions_by_entity.get(entity_id or "", ())
+        lines = [
+            "Action palette",
+            "",
+            f"Screen: {self.current_screen}",
+            f"Pane: {self.current_pane}",
+            "",
+            "Available actions:",
+        ]
+        if actions:
+            lines.extend(f"- {action}" for action in actions)
+        else:
+            lines.append("- No contextual actions")
+        lines.extend(
+            [
+                "",
+                "Global actions:",
+                "- Refresh snapshot",
+                "- Toggle links modal",
+                "- Search current pane",
+                "- Cycle filters",
+                "- Cycle sort mode",
+            ]
+        )
+        return Panel(Text("\n".join(lines)), title="Palette", border_style="cyan")
+
+    def _render_logs_modal(self) -> RenderableType:
+        content = Group(
+            Text(self.logs_modal_title, style="bold"),
+            Text("\nStdout", style="bold"),
+            Text(self.logs_modal_stdout or "(no stdout)"),
+            Text("\nStderr", style="bold"),
+            Text(self.logs_modal_stderr or "(no stderr)", style="dim"),
+        )
+        return Panel(content, title="Full logs", border_style="cyan")
+
     def _render_footer(self) -> RenderableType:
         selected = self._focus_label()
+        search_hint = ""
+        if self.input_mode == "search":
+            search_hint = f" • search> {self.input_buffer}"
+        else:
+            pane = self._active_list_pane()
+            filter_mode = self.filter_modes.get(pane, "all")
+            sort_mode = self.sort_modes.get(pane, "recent")
+            query = self.search_queries.get(pane, "")
+            search_hint = f" • filter: {filter_mode} • sort: {sort_mode}"
+            if query:
+                search_hint += f" • query: {query}"
         return Panel(
-            Text(f"{COMMAND_HINT} • focus: {selected}", style="bold cyan"),
+            Text(f"{COMMAND_HINT} • focus: {selected}{search_hint}", style="bold cyan"),
             border_style="cyan",
         )
 
@@ -613,27 +734,32 @@ class ResearchCopilotTUI:
         )
 
     def _selected_job(self) -> JobRecord | None:
-        return self.snapshot.jobs[self.selected_job_index] if self.snapshot.jobs else None
+        jobs = self._visible_jobs()
+        return jobs[self.selected_job_index] if jobs else None
 
     def _selected_job_entity_id(self) -> str | None:
         job = self._selected_job()
         return job.entity_id if job else None
 
     def _selected_experiment(self) -> ExperimentRecord | None:
-        return self.snapshot.experiments[self.selected_experiment_index] if self.snapshot.experiments else None
+        experiments = self._visible_experiments()
+        return experiments[self.selected_experiment_index] if experiments else None
 
     def _selected_experiment_entity_id(self) -> str | None:
         experiment = self._selected_experiment()
         return experiment.entity_id if experiment else None
 
     def _selected_insight(self) -> InsightRecord | None:
-        return self.snapshot.insights[self.selected_insight_index] if self.snapshot.insights else None
+        insights = self._visible_insights()
+        return insights[self.selected_insight_index] if insights else None
 
     def _selected_paper(self) -> PaperRecord | None:
-        return self.snapshot.papers[self.selected_paper_index] if self.snapshot.papers else None
+        papers = self._visible_papers()
+        return papers[self.selected_paper_index] if papers else None
 
     def _selected_context(self) -> ContextRecord | None:
-        return self.snapshot.context_entries[self.selected_context_index] if self.snapshot.context_entries else None
+        context_entries = self._visible_context_entries()
+        return context_entries[self.selected_context_index] if context_entries else None
 
     def _selected_entity_id(self) -> str | None:
         if self.current_screen == "experiments":
@@ -653,6 +779,115 @@ class ResearchCopilotTUI:
         entity_id = self._selected_entity_id()
         return self.snapshot.links_by_entity.get(entity_id, ()) if entity_id else ()
 
+    def _active_list_pane(self) -> str:
+        if self.current_screen == "overview":
+            return "experiments" if self.current_pane == "experiments" else "runs"
+        if self.current_pane == "links":
+            return "experiments" if self.current_screen == "experiments" else "runs"
+        return self.current_pane
+
+    def _visible_jobs(self) -> tuple[JobRecord, ...]:
+        jobs = list(self.snapshot.jobs)
+        filter_mode = self.filter_modes["runs"]
+        query = self.search_queries["runs"].lower()
+        sort_mode = self.sort_modes["runs"]
+        if filter_mode == "active":
+            jobs = [job for job in jobs if job.status in {"RUNNING", "PENDING"}]
+        elif filter_mode == "completed":
+            jobs = [job for job in jobs if job.status == "COMPLETED"]
+        elif filter_mode == "failed":
+            jobs = [job for job in jobs if job.status in {"FAILED", "CANCELLED"}]
+        if query:
+            jobs = [job for job in jobs if query in f"{job.name} {job.job_id} {job.partition}".lower()]
+        if sort_mode == "name":
+            jobs.sort(key=lambda job: job.name.lower())
+        elif sort_mode == "status":
+            jobs.sort(key=lambda job: (job.status, job.name.lower()))
+        else:
+            jobs.sort(key=lambda job: (job.submitted_at, job.job_id), reverse=True)
+        self.selected_job_index = self._bounded_index(self.selected_job_index, len(jobs))
+        return tuple(jobs)
+
+    def _visible_experiments(self) -> tuple[ExperimentRecord, ...]:
+        experiments = list(self.snapshot.experiments)
+        filter_mode = self.filter_modes["experiments"]
+        query = self.search_queries["experiments"].lower()
+        sort_mode = self.sort_modes["experiments"]
+        if filter_mode == "running":
+            experiments = [item for item in experiments if item.status == "running"]
+        elif filter_mode == "completed":
+            experiments = [item for item in experiments if item.status == "completed"]
+        elif filter_mode == "failed":
+            experiments = [item for item in experiments if item.status in {"failed", "cancelled"}]
+        if query:
+            experiments = [
+                item
+                for item in experiments
+                if query in f"{item.name} {item.dataset} {item.model_type} {item.hypothesis}".lower()
+            ]
+        if sort_mode == "name":
+            experiments.sort(key=lambda item: item.name.lower())
+        elif sort_mode == "status":
+            experiments.sort(key=lambda item: (item.status, item.name.lower()))
+        else:
+            experiments.sort(key=lambda item: (item.updated_at, item.experiment_id), reverse=True)
+        self.selected_experiment_index = self._bounded_index(self.selected_experiment_index, len(experiments))
+        return tuple(experiments)
+
+    def _visible_insights(self) -> tuple[InsightRecord, ...]:
+        insights = list(self.snapshot.insights)
+        filter_mode = self.filter_modes["insights"]
+        query = self.search_queries["insights"].lower()
+        sort_mode = self.sort_modes["insights"]
+        if filter_mode != "all":
+            insights = [item for item in insights if item.category == filter_mode]
+        if query:
+            insights = [item for item in insights if query in f"{item.title} {item.content} {item.category}".lower()]
+        if sort_mode == "title":
+            insights.sort(key=lambda item: item.title.lower())
+        elif sort_mode == "confidence":
+            insights.sort(key=lambda item: item.confidence, reverse=True)
+        else:
+            insights.sort(key=lambda item: item.created_at, reverse=True)
+        self.selected_insight_index = self._bounded_index(self.selected_insight_index, len(insights))
+        return tuple(insights)
+
+    def _visible_papers(self) -> tuple[PaperRecord, ...]:
+        papers = list(self.snapshot.papers)
+        filter_mode = self.filter_modes["papers"]
+        query = self.search_queries["papers"].lower()
+        sort_mode = self.sort_modes["papers"]
+        if filter_mode == "recent":
+            papers = sorted(papers, key=lambda item: item.added_at, reverse=True)[:5]
+        if query:
+            papers = [item for item in papers if query in f"{item.title} {' '.join(item.authors)} {item.year}".lower()]
+        if sort_mode == "title":
+            papers.sort(key=lambda item: item.title.lower())
+        elif sort_mode == "year":
+            papers.sort(key=lambda item: item.year, reverse=True)
+        else:
+            papers.sort(key=lambda item: item.added_at, reverse=True)
+        self.selected_paper_index = self._bounded_index(self.selected_paper_index, len(papers))
+        return tuple(papers)
+
+    def _visible_context_entries(self) -> tuple[ContextRecord, ...]:
+        context_entries = list(self.snapshot.context_entries)
+        filter_mode = self.filter_modes["context"]
+        query = self.search_queries["context"].lower()
+        sort_mode = self.sort_modes["context"]
+        if filter_mode != "all":
+            context_entries = [item for item in context_entries if item.context_type == filter_mode]
+        if query:
+            context_entries = [item for item in context_entries if query in f"{item.key} {item.value} {item.context_type}".lower()]
+        if sort_mode == "key":
+            context_entries.sort(key=lambda item: item.key.lower())
+        elif sort_mode == "type":
+            context_entries.sort(key=lambda item: (item.context_type, item.key.lower()))
+        else:
+            context_entries.sort(key=lambda item: item.updated_at, reverse=True)
+        self.selected_context_index = self._bounded_index(self.selected_context_index, len(context_entries))
+        return tuple(context_entries)
+
     def _metric_panel(self, label: str, value: str, style: str) -> RenderableType:
         return Panel(Text(value, justify="center", style=f"bold {style}"), title=label)
 
@@ -671,6 +906,63 @@ class ResearchCopilotTUI:
         if lowered in {"failed", "cancelled"}:
             return "bold red"
         return "bold white"
+
+    def _cycle_filter(self) -> None:
+        pane = self._active_list_pane()
+        cycle = FILTER_CYCLES.get(pane)
+        if not cycle:
+            return
+        current = self.filter_modes[pane]
+        index = (cycle.index(current) + 1) % len(cycle)
+        self.filter_modes[pane] = cycle[index]
+
+    def _cycle_sort(self) -> None:
+        pane = self._active_list_pane()
+        cycle = SORT_CYCLES.get(pane)
+        if not cycle:
+            return
+        current = self.sort_modes[pane]
+        index = (cycle.index(current) + 1) % len(cycle)
+        self.sort_modes[pane] = cycle[index]
+
+    def _handle_search_input(self, raw: str, normalized: str) -> bool:
+        if raw in {"\r", "\n"} or normalized == "enter":
+            self.search_queries[self._active_list_pane()] = self.input_buffer.strip()
+            self.input_mode = ""
+            return True
+        if raw in {"\x08", "\x7f"} or normalized == "backspace":
+            self.input_buffer = self.input_buffer[:-1]
+            return True
+        if normalized == "escape" or raw == "\x1b":
+            self.input_mode = ""
+            self.input_buffer = ""
+            return True
+        if len(raw) == 1 and raw.isprintable():
+            self.input_buffer += raw
+            return True
+        return True
+
+    def _open_logs_modal(self) -> None:
+        job = self._selected_job()
+        run_entity_id = self._selected_job_entity_id()
+        if self.current_screen == "experiments" and not job:
+            experiment = self._selected_experiment()
+            if experiment and experiment.slurm_job_id:
+                for candidate in self.snapshot.jobs:
+                    if candidate.job_id == experiment.slurm_job_id:
+                        job = candidate
+                        run_entity_id = candidate.entity_id
+                        break
+        if job is None:
+            return
+        log_record = fetch_full_run_log(run_entity_id or f"run:{job.job_id}")
+        self.logs_modal_title = f"{job.name} ({job.job_id})"
+        self.logs_modal_stdout = log_record.stdout
+        self.logs_modal_stderr = log_record.stderr
+        self.show_logs_modal = True
+        self.show_help = False
+        self.show_links_modal = False
+        self.show_palette = False
 
     def _open_focused_item(self) -> None:
         if self.current_screen == "overview":

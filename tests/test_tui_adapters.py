@@ -19,11 +19,13 @@ from research_copilot.mcp_servers.slurm import (
     handle_check_job_status,
     handle_submit_job,
 )
+from research_copilot.services.research_ops import ResearchOpsService
 from research_copilot.services.workflow_snapshot import (
     build_canonical_snapshot,
     build_workflow_snapshot,
     summarize_job,
 )
+from research_copilot.tui.adapters import fetch_full_run_log, load_full_job_logs
 
 
 @pytest.fixture(autouse=True)
@@ -191,3 +193,60 @@ class TestJobSummaries:
         assert summary["stdout_preview"].startswith("…")
         assert "line 11" in summary["stdout_preview"]
         assert summary["stderr_preview"]
+
+    def test_load_full_job_logs_fetches_full_output(self):
+        from research_copilot.mcp_servers.slurm import MockJob
+
+        _mock_jobs["job-logs"] = MockJob(
+            job_id="job-logs",
+            name="log-heavy",
+            status="RUNNING",
+            script="echo test",
+            partition="gpu",
+            gpus=1,
+            time_limit="01:00:00",
+            submitted_at="2026-04-11T14:00:00+00:00",
+            output="full stdout body",
+            error="full stderr body",
+        )
+
+        stdout, stderr = load_full_job_logs("job-logs")
+
+        assert stdout == "full stdout body"
+        assert stderr == "full stderr body"
+
+    def test_fetch_full_run_log_uses_entity_id_without_snapshot_log_leakage(self):
+        from research_copilot.mcp_servers.slurm import MockJob
+
+        jobs = {
+            "12345": MockJob(
+                job_id="12345",
+                name="log-heavy",
+                status="RUNNING",
+                script="echo test",
+                partition="gpu",
+                gpus=1,
+                time_limit="01:00:00",
+                submitted_at="2026-04-11T14:00:00+00:00",
+                output="\n".join(f"epoch={idx}" for idx in range(24)),
+                error="stderr line",
+            )
+        }
+
+        canonical = build_canonical_snapshot(jobs=jobs, max_items=5, max_log_lines=3, max_log_chars=18)
+        run_entity = canonical["entities"]["run"][0]
+        preview = run_entity["attributes"]["log_summary"]["stdout_preview"]
+
+        assert "epoch=23" in preview
+        assert "epoch=0" not in preview
+
+        full_log = fetch_full_run_log("run:12345", service=ResearchOpsService(store={}, jobs=jobs))
+
+        assert full_log.entity_id == "run:12345"
+        assert full_log.job_id == "12345"
+        assert "epoch=0" in full_log.stdout
+        assert full_log.stderr == "stderr line"
+
+    def test_fetch_full_run_log_rejects_non_run_entity_ids(self):
+        with pytest.raises(ValueError, match="Unsupported log entity id"):
+            fetch_full_run_log("experiment:exp-1", service=ResearchOpsService(store={}, jobs={}))

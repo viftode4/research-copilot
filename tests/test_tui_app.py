@@ -179,10 +179,10 @@ def test_tui_help_and_links_modals_toggle():
     app = ResearchCopilotTUI(snapshot_loader=_seeded_snapshot)
 
     app.handle_command("?")
-    assert "v1a key bindings" in _render_text(app.render())
+    assert "v1b key bindings" in _render_text(app.render())
 
     app.handle_command("q")
-    assert "v1a key bindings" not in _render_text(app.render())
+    assert "v1b key bindings" not in _render_text(app.render())
 
     app.handle_command("2")
     app.handle_command("g")
@@ -209,3 +209,46 @@ def test_tui_open_focused_item_on_experiment_opens_links_modal():
     app.handle_command("enter")
 
     assert app.show_links_modal is True
+
+
+def test_tui_search_filter_sort_and_palette_behaviors(monkeypatch):
+    app = ResearchCopilotTUI(snapshot_loader=_seeded_snapshot)
+
+    app.handle_command("/")
+    for key in "pfn":
+        app.handle_key(key)
+    app.handle_command("enter")
+    assert app.search_queries["runs"] == "pfn"
+
+    app.handle_command("3")
+    app.handle_command("f")
+    assert app.filter_modes["experiments"] == "running"
+
+    app.handle_command("s")
+    assert app.sort_modes["experiments"] == "name"
+
+    app.handle_key("\x10")
+    assert app.show_palette is True
+
+
+def test_tui_logs_modal_loads_full_logs(monkeypatch):
+    monkeypatch.setattr(
+        "research_copilot.tui.app.fetch_full_run_log",
+        lambda entity_id: type(
+            "FullLogRecord",
+            (),
+            {
+                "entity_id": entity_id,
+                "job_id": entity_id.removeprefix("run:"),
+                "stdout": "full stdout for " + entity_id.removeprefix("run:"),
+                "stderr": "full stderr for " + entity_id.removeprefix("run:"),
+            },
+        )(),
+    )
+    app = ResearchCopilotTUI(snapshot_loader=_seeded_snapshot)
+
+    app.handle_command("2")
+    app.handle_command("l")
+
+    assert app.show_logs_modal is True
+    assert "full stdout for job-1" in _render_text(app.render())

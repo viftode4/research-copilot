@@ -33,6 +33,19 @@ def summarize_mapping(data: dict[str, Any]) -> str:
     return "\n".join(f"{key}: {value}" for key, value in sorted(data.items()))
 
 
+def load_full_job_logs(
+    job_id: str,
+    *,
+    service: ResearchOpsService | None = None,
+) -> tuple[str, str]:
+    """Load full logs for a run/job on demand by stable job id."""
+
+    state = (service or ResearchOpsService()).get_job(job_id)
+    stdout = state.stdout or "(no stdout)"
+    stderr = state.stderr or "(no stderr)"
+    return stdout, stderr
+
+
 @dataclass(frozen=True)
 class LinkedRecord:
     entity_id: str
@@ -106,6 +119,28 @@ class ContextRecord:
     context_type: str
     value: str
     updated_at: str
+
+
+@dataclass(frozen=True)
+class FullLogRecord:
+    entity_id: str
+    job_id: str
+    stdout: str
+    stderr: str
+
+
+def fetch_full_run_log(
+    entity_id: str,
+    *,
+    service: ResearchOpsService | None = None,
+) -> FullLogRecord:
+    """Resolve full logs from a stable run entity id."""
+
+    if not entity_id.startswith("run:"):
+        raise ValueError(f"Unsupported log entity id: {entity_id}")
+    job_id = entity_id.removeprefix("run:")
+    stdout, stderr = load_full_job_logs(job_id, service=service)
+    return FullLogRecord(entity_id=entity_id, job_id=job_id, stdout=stdout, stderr=stderr)
 
 
 @dataclass(frozen=True)
