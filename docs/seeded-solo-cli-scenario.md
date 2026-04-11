@@ -4,6 +4,22 @@ This example documents the single-operator CLI flow covered by `tests/test_cli_s
 It stays CLI-only, uses the in-memory mock backends, and proves the current MVP flow without a DB,
 web surface, or multi-user coordination.
 
+Before running the seeded mock flow, the recommended onboarding command for the local
+random-data Python case is:
+
+```bash
+research-copilot workflow onboard \
+  --goal "Test whether random.Random() shows simple patterns" \
+  --success-criteria "Persist one completed experiment with a written review" \
+  --active-profile result-reasoner \
+  --autonomy-level bounded \
+  --allowed-action "run local experiments" \
+  --allowed-action "review results" \
+  --constraint "single-user only" \
+  --stop-condition "stop on repeated failure" \
+  --json
+```
+
 ## Scenario
 
 1. Triage the empty workspace:
