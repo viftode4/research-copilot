@@ -78,6 +78,9 @@ class InsightState:
     confidence: float | str | None
     content: str
     created_at: str
+    linked_experiment_id: str
+    linked_job_id: str
+    provenance: dict[str, Any]
 
 
 @dataclass(frozen=True)
@@ -89,6 +92,9 @@ class PaperState:
     relevance_notes: str
     tags: tuple[str, ...]
     added_at: str
+    linked_experiment_id: str
+    linked_job_id: str
+    provenance: dict[str, Any]
 
 
 @dataclass(frozen=True)
@@ -98,6 +104,9 @@ class ContextState:
     context_type: str
     value: str
     updated_at: str
+    linked_experiment_id: str
+    linked_job_id: str
+    provenance: dict[str, Any]
 
 
 @dataclass(frozen=True)
@@ -112,6 +121,29 @@ class ResearchOpsState:
     @property
     def active_jobs(self) -> int:
         return sum(1 for job in self.jobs if job.status in ACTIVE_JOB_STATUSES)
+
+
+def _linked_reference(record: Mapping[str, Any], key: str) -> str:
+    value = str(record.get(key, "") or "")
+    if value:
+        return value
+    provenance = record.get("provenance")
+    if isinstance(provenance, Mapping):
+        return str(
+            provenance.get(key, "")
+            or provenance.get(
+                "related_experiment_id" if key == "linked_experiment_id" else "related_job_id", ""
+            )
+            or ""
+        )
+    return ""
+
+
+def _record_provenance(record: Mapping[str, Any]) -> dict[str, Any]:
+    provenance = record.get("provenance")
+    if isinstance(provenance, Mapping):
+        return dict(provenance)
+    return {}
 
 
 
@@ -258,6 +290,9 @@ class ResearchOpsService:
                 confidence=insight.get("confidence"),
                 content=str(insight.get("content", "")),
                 created_at=str(insight.get("created_at", "")),
+                linked_experiment_id=_linked_reference(insight, "linked_experiment_id"),
+                linked_job_id=_linked_reference(insight, "linked_job_id"),
+                provenance=_record_provenance(insight),
             )
             for insight in list(self._store.get("insights", []))[-insight_limit:][::-1]
         )
@@ -270,6 +305,9 @@ class ResearchOpsService:
                 relevance_notes=str(paper.get("relevance_notes", "")),
                 tags=tuple(paper.get("tags", [])),
                 added_at=str(paper.get("added_at", "")),
+                linked_experiment_id=_linked_reference(paper, "linked_experiment_id"),
+                linked_job_id=_linked_reference(paper, "linked_job_id"),
+                provenance=_record_provenance(paper),
             )
             for paper in list(self._store.get("papers", []))[-paper_limit:][::-1]
         )
@@ -280,6 +318,9 @@ class ResearchOpsService:
                 context_type=str(entry.get("context_type", "note")),
                 value=str(entry.get("value", "")),
                 updated_at=str(entry.get("updated_at", "")),
+                linked_experiment_id=_linked_reference(entry, "linked_experiment_id"),
+                linked_job_id=_linked_reference(entry, "linked_job_id"),
+                provenance=_record_provenance(entry),
             )
             for entry in list(self._store.get("context", []))[-context_limit:][::-1]
         )

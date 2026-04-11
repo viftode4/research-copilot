@@ -20,6 +20,7 @@ from research_copilot.mcp_servers.slurm import (
     handle_submit_job,
 )
 from research_copilot.services.workflow_snapshot import (
+    build_canonical_snapshot,
     build_workflow_snapshot,
     summarize_job,
 )
@@ -50,6 +51,31 @@ class TestWorkflowSnapshot:
         assert snapshot["selection"]["default_job_id"] is None
         assert snapshot["selection"]["default_experiment_id"] is None
 
+    def test_canonical_snapshot_exposes_contract_fields(self):
+        snapshot = build_canonical_snapshot()
+
+        assert snapshot["schema_version"] == "1.0.0"
+        assert snapshot["snapshot_owner"] == "research_copilot.services.workflow_snapshot.build_canonical_snapshot"
+        assert snapshot["workspace"]["id"].startswith("workspace:")
+        assert "entities" in snapshot
+        assert "links" in snapshot
+        assert "actions" in snapshot
+        assert snapshot["state_semantics"]["snapshot_state"] == "complete"
+        assert all("source_id" in link and "target_id" in link and "link_type" in link for link in snapshot["links"])
+        assert all(
+            {
+                "action_id",
+                "label",
+                "tier",
+                "safety_level",
+                "enabled",
+                "preconditions",
+                "target_entity_id",
+                "scope",
+            }.issubset(action)
+            for action in snapshot["actions"]
+        )
+
     @pytest.mark.asyncio
     async def test_snapshot_links_jobs_experiments_and_knowledge(self):
         submit = await handle_submit_job(
@@ -77,13 +103,24 @@ class TestWorkflowSnapshot:
                 "title": "Scheduler note",
                 "content": "Warmup keeps loss stable",
                 "category": "finding",
+                "linked_experiment_id": experiment_id,
             }
         )
         await handle_store_paper(
-            {"title": "PFNs for Learning Curves", "authors": '["Alice", "Bob"]', "year": 2024}
+            {
+                "title": "PFNs for Learning Curves",
+                "authors": '["Alice", "Bob"]',
+                "year": 2024,
+                "linked_experiment_id": experiment_id,
+            }
         )
         await handle_set_research_context(
-            {"key": "focus", "value": "Monitor active LCDB jobs", "context_type": "goal"}
+            {
+                "key": "focus",
+                "value": "Monitor active LCDB jobs",
+                "context_type": "goal",
+                "linked_experiment_id": experiment_id,
+            }
         )
 
         snapshot = build_workflow_snapshot()
@@ -98,6 +135,16 @@ class TestWorkflowSnapshot:
         assert snapshot["knowledge"]["context_total"] == 1
         assert snapshot["selection"]["default_job_id"] == job_id
         assert snapshot["selection"]["default_experiment_id"] == experiment_id
+
+        canonical = build_canonical_snapshot()
+        experiment_entity = canonical["entities"]["experiment"][0]
+        assert experiment_entity["attributes"]["experiment_id"] == experiment_id
+        assert canonical["entities"]["workspace"][0]["attributes"]["counts"]["jobs"] == 1
+        assert canonical["entities"]["workspace"][0]["attributes"]["counts"]["experiments"] == 1
+        assert any(link["link_type"] == "run_to_job" for link in canonical["links"])
+        assert any(link["link_type"] == "experiment_to_run" for link in canonical["links"])
+        assert any(link["link_type"] == "experiment_to_insight" for link in canonical["links"])
+        assert any(link["link_type"] == "experiment_to_context" for link in canonical["links"])
 
     @pytest.mark.asyncio
     async def test_snapshot_refresh_reflects_job_progression(self):

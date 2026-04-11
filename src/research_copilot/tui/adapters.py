@@ -1,17 +1,14 @@
-"""Read-oriented adapters that normalize backend state for the TUI."""
+"""Read-oriented adapters that normalize backend state for the v1a TUI."""
 
 from __future__ import annotations
 
-from collections import Counter
+from collections import Counter, defaultdict
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
-from research_copilot.services.research_ops import (
-    ACTIVE_JOB_STATUSES,
-    ResearchOpsService,
-    ResearchOpsState,
-)
+from research_copilot.services.research_ops import ACTIVE_JOB_STATUSES, ResearchOpsService
+from research_copilot.services.workflow_snapshot import build_canonical_snapshot
 
 
 def _parse_timestamp(value: str) -> datetime | None:
@@ -36,15 +33,20 @@ def summarize_mapping(data: dict[str, Any]) -> str:
     return "\n".join(f"{key}: {value}" for key, value in sorted(data.items()))
 
 
-def tail_text(value: str, max_lines: int = 8, empty_message: str = "(no logs yet)") -> str:
-    if not value:
-        return empty_message
-    return "\n".join(value.splitlines()[-max_lines:])
+@dataclass(frozen=True)
+class LinkedRecord:
+    entity_id: str
+    title: str
+    entity_type: str
+    relation: str
+    status: str
 
 
 @dataclass(frozen=True)
 class JobRecord:
+    entity_id: str
     job_id: str
+    run_id: str
     name: str
     status: str
     partition: str
@@ -59,6 +61,7 @@ class JobRecord:
 
 @dataclass(frozen=True)
 class ExperimentRecord:
+    entity_id: str
     experiment_id: str
     name: str
     status: str
@@ -75,6 +78,7 @@ class ExperimentRecord:
 
 @dataclass(frozen=True)
 class InsightRecord:
+    entity_id: str
     insight_id: str
     title: str
     category: str
@@ -85,6 +89,7 @@ class InsightRecord:
 
 @dataclass(frozen=True)
 class PaperRecord:
+    entity_id: str
     paper_id: str
     title: str
     authors: tuple[str, ...]
@@ -95,6 +100,7 @@ class PaperRecord:
 
 @dataclass(frozen=True)
 class ContextRecord:
+    entity_id: str
     context_id: str
     key: str
     context_type: str
@@ -110,6 +116,11 @@ class DashboardSnapshot:
     papers: tuple[PaperRecord, ...]
     context_entries: tuple[ContextRecord, ...]
     experiment_status_counts: dict[str, int]
+    links_by_entity: dict[str, tuple[LinkedRecord, ...]]
+    actions_by_entity: dict[str, tuple[str, ...]]
+    schema_version: str
+    snapshot_owner: str
+    snapshot_state: str
 
     @property
     def active_jobs(self) -> int:
@@ -124,197 +135,168 @@ class DashboardSnapshot:
         return self.experiment_status_counts.get("running", 0)
 
 
-def _load_state(
-    *,
-    service: ResearchOpsService | None = None,
-    job_limit: int | None = None,
-    experiment_limit: int | None = None,
-    insight_limit: int | None = None,
-    paper_limit: int | None = None,
-    context_limit: int | None = None,
-) -> ResearchOpsState:
-    return (service or ResearchOpsService()).snapshot(
-        job_limit=job_limit,
-        experiment_limit=experiment_limit,
-        insight_limit=insight_limit,
-        paper_limit=paper_limit,
-        context_limit=context_limit,
-    )
+def _normalized_job_status(status: str) -> str:
+    return {
+        "queued": "PENDING",
+        "running": "RUNNING",
+        "succeeded": "COMPLETED",
+        "failed": "FAILED",
+        "cancelled": "CANCELLED",
+    }.get(status, "UNKNOWN")
 
 
-def load_job_records(limit: int = 20, *, service: ResearchOpsService | None = None) -> tuple[JobRecord, ...]:
-    state = _load_state(service=service, job_limit=limit)
-    return tuple(
-        JobRecord(
-            job_id=job.job_id,
-            name=job.name,
-            status=job.status,
-            partition=job.partition,
-            gpus=job.gpus,
-            submitted_at=job.submitted_at,
-            started_at=job.started_at,
-            completed_at=job.completed_at,
-            time_limit=job.time_limit,
-            log_tail=tail_text(job.stdout),
-            error_tail=tail_text(job.stderr, empty_message="(no stderr)"),
+def _normalized_experiment_status(status: str) -> str:
+    return {
+        "queued": "planned",
+        "running": "running",
+        "succeeded": "completed",
+        "failed": "failed",
+        "cancelled": "cancelled",
+        "blocked": "blocked",
+    }.get(status, "unknown")
+
+
+def _build_links_index(snapshot: dict[str, Any]) -> dict[str, tuple[LinkedRecord, ...]]:
+    entity_lookup = {
+        entity["id"]: entity
+        for entities in snapshot["entities"].values()
+        for entity in entities
+    }
+    links_by_entity: dict[str, list[LinkedRecord]] = defaultdict(list)
+    for link in snapshot["links"]:
+        source = entity_lookup.get(link["source_id"])
+        target = entity_lookup.get(link["target_id"])
+        if not source or not target:
+            continue
+        links_by_entity[source["id"]].append(
+            LinkedRecord(
+                entity_id=target["id"],
+                title=target.get("title") or target.get("name") or target["id"],
+                entity_type=target["type"],
+                relation=link["link_type"],
+                status=str(target.get("status", "")),
+            )
         )
-        for job in state.jobs
-    )
-
-
-def load_experiment_records(
-    limit: int = 20, *, service: ResearchOpsService | None = None
-) -> tuple[ExperimentRecord, ...]:
-    state = _load_state(service=service, experiment_limit=limit)
-    return tuple(
-        ExperimentRecord(
-            experiment_id=experiment.experiment_id,
-            name=experiment.name,
-            status=experiment.status,
-            hypothesis=experiment.hypothesis,
-            description=experiment.description,
-            dataset=experiment.dataset,
-            model_type=experiment.model_type,
-            tags=experiment.tags,
-            updated_at=experiment.updated_at,
-            results_summary=summarize_mapping(experiment.results),
-            wandb_run_id=experiment.wandb_run_id,
-            slurm_job_id=experiment.linked_job_id or "",
+        links_by_entity[target["id"]].append(
+            LinkedRecord(
+                entity_id=source["id"],
+                title=source.get("title") or source.get("name") or source["id"],
+                entity_type=source["type"],
+                relation=f"linked_from:{link['link_type']}",
+                status=str(source.get("status", "")),
+            )
         )
-        for experiment in state.experiments
-    )
+    return {entity_id: tuple(items) for entity_id, items in links_by_entity.items()}
 
 
-def load_insight_records(
-    limit: int = 10, *, service: ResearchOpsService | None = None
-) -> tuple[InsightRecord, ...]:
-    state = _load_state(service=service, insight_limit=limit)
-    return tuple(
-        InsightRecord(
-            insight_id=insight.insight_id,
-            title=insight.title,
-            category=insight.category,
-            confidence=(
-                f"{insight.confidence:.2f}" if isinstance(insight.confidence, float) else "—"
-            ),
-            content=insight.content,
-            created_at=insight.created_at,
-        )
-        for insight in state.insights
-    )
-
-
-def load_paper_records(
-    limit: int = 10, *, service: ResearchOpsService | None = None
-) -> tuple[PaperRecord, ...]:
-    state = _load_state(service=service, paper_limit=limit)
-    return tuple(
-        PaperRecord(
-            paper_id=paper.paper_id,
-            title=paper.title,
-            authors=paper.authors,
-            year=str(paper.year or "—"),
-            relevance_notes=paper.relevance_notes,
-            added_at=paper.added_at,
-        )
-        for paper in state.papers
-    )
-
-
-def load_context_records(
-    limit: int = 10, *, service: ResearchOpsService | None = None
-) -> tuple[ContextRecord, ...]:
-    state = _load_state(service=service, context_limit=limit)
-    return tuple(
-        ContextRecord(
-            context_id=context.context_id,
-            key=context.key,
-            context_type=context.context_type,
-            value=context.value,
-            updated_at=context.updated_at,
-        )
-        for context in state.context_entries
-    )
+def _build_actions_index(snapshot: dict[str, Any]) -> dict[str, tuple[str, ...]]:
+    actions_by_entity: dict[str, list[str]] = defaultdict(list)
+    for action in snapshot["actions"]:
+        if action.get("enabled"):
+            actions_by_entity[action["target_entity_id"]].append(action["label"])
+    return {entity_id: tuple(labels) for entity_id, labels in actions_by_entity.items()}
 
 
 def build_dashboard_snapshot(*, service: ResearchOpsService | None = None) -> DashboardSnapshot:
-    state = _load_state(
-        service=service,
-        job_limit=20,
-        experiment_limit=20,
-        insight_limit=10,
-        paper_limit=10,
-        context_limit=10,
+    """Build the v1a dashboard snapshot from the canonical workflow snapshot."""
+
+    store = service._store if service is not None else None  # noqa: SLF001
+    jobs = service._jobs if service is not None else None  # noqa: SLF001
+    snapshot = build_canonical_snapshot(store=store, jobs=jobs, max_items=20)
+    links_by_entity = _build_links_index(snapshot)
+    actions_by_entity = _build_actions_index(snapshot)
+
+    run_entities = snapshot["entities"].get("run", [])
+    experiment_entities = snapshot["entities"].get("experiment", [])
+    insight_entities = snapshot["entities"].get("insight", [])
+    paper_entities = snapshot["entities"].get("paper", [])
+    context_entities = snapshot["entities"].get("context", [])
+
+    jobs_records = tuple(
+        JobRecord(
+            entity_id=entity["id"],
+            job_id=str(entity["attributes"]["job_id"]),
+            run_id=str(entity["id"].removeprefix("run:")),
+            name=str(entity["name"]),
+            status=_normalized_job_status(str(entity["status"])),
+            partition=str(entity["attributes"]["partition"]),
+            gpus=int(entity["attributes"]["gpus"]),
+            submitted_at=str(entity["attributes"]["submitted_at"]),
+            started_at=str(entity["attributes"]["started_at"] or ""),
+            completed_at=str(entity["attributes"]["completed_at"] or ""),
+            time_limit=str(entity["attributes"]["time_limit"]),
+            log_tail=str(entity["attributes"]["log_summary"]["stdout_preview"]),
+            error_tail=str(entity["attributes"]["log_summary"]["stderr_preview"] or "(no stderr)"),
+        )
+        for entity in run_entities
     )
+
     experiments = tuple(
         ExperimentRecord(
-            experiment_id=experiment.experiment_id,
-            name=experiment.name,
-            status=experiment.status,
-            hypothesis=experiment.hypothesis,
-            description=experiment.description,
-            dataset=experiment.dataset,
-            model_type=experiment.model_type,
-            tags=experiment.tags,
-            updated_at=experiment.updated_at,
-            results_summary=summarize_mapping(experiment.results),
-            wandb_run_id=experiment.wandb_run_id,
-            slurm_job_id=experiment.linked_job_id or "",
+            entity_id=entity["id"],
+            experiment_id=str(entity["attributes"]["experiment_id"]),
+            name=str(entity["name"]),
+            status=_normalized_experiment_status(str(entity["status"])),
+            hypothesis=str(entity["summary"]),
+            description=str(entity["summary"]),
+            dataset=str(entity["attributes"]["dataset"]),
+            model_type=str(entity["attributes"]["model_type"]),
+            tags=tuple(entity["attributes"]["tags"]),
+            updated_at=str(entity["updated_at"]),
+            results_summary=summarize_mapping(dict(entity.get("metrics") or {})),
+            wandb_run_id=str(entity["attributes"]["wandb_run_id"]),
+            slurm_job_id=str(entity["attributes"]["linked_job_id"] or ""),
         )
-        for experiment in state.experiments
+        for entity in experiment_entities
     )
+
     status_counts = Counter(experiment.status for experiment in experiments)
+    insights = tuple(
+        InsightRecord(
+            entity_id=entity["id"],
+            insight_id=str(entity["id"].removeprefix("insight:")),
+            title=str(entity["title"]),
+            category=str(entity["attributes"]["category"]),
+            confidence=str(entity["attributes"]["confidence"] if entity["attributes"]["confidence"] != "" else "—"),
+            content=str(entity["summary"]),
+            created_at=str(entity["updated_at"]),
+        )
+        for entity in insight_entities
+    )
+    papers = tuple(
+        PaperRecord(
+            entity_id=entity["id"],
+            paper_id=str(entity["id"].removeprefix("paper:")),
+            title=str(entity["title"]),
+            authors=tuple(entity["attributes"]["authors"]),
+            year=str(entity["attributes"]["year"]),
+            relevance_notes=str(entity["summary"]),
+            added_at=str(entity["updated_at"]),
+        )
+        for entity in paper_entities
+    )
+    context_entries = tuple(
+        ContextRecord(
+            entity_id=entity["id"],
+            context_id=str(entity["id"].removeprefix("context:")),
+            key=str(entity["attributes"]["key"]),
+            context_type=str(entity["attributes"]["context_type"]),
+            value=str(entity["summary"]),
+            updated_at=str(entity["updated_at"]),
+        )
+        for entity in context_entities
+    )
+
     return DashboardSnapshot(
-        jobs=tuple(
-            JobRecord(
-                job_id=job.job_id,
-                name=job.name,
-                status=job.status,
-                partition=job.partition,
-                gpus=job.gpus,
-                submitted_at=job.submitted_at,
-                started_at=job.started_at,
-                completed_at=job.completed_at,
-                time_limit=job.time_limit,
-                log_tail=tail_text(job.stdout),
-                error_tail=tail_text(job.stderr, empty_message="(no stderr)"),
-            )
-            for job in state.jobs
-        ),
+        jobs=jobs_records,
         experiments=experiments,
-        insights=tuple(
-            InsightRecord(
-                insight_id=insight.insight_id,
-                title=insight.title,
-                category=insight.category,
-                confidence=f"{insight.confidence:.2f}"
-                if isinstance(insight.confidence, float)
-                else "—",
-                content=insight.content,
-                created_at=insight.created_at,
-            )
-            for insight in state.insights
-        ),
-        papers=tuple(
-            PaperRecord(
-                paper_id=paper.paper_id,
-                title=paper.title,
-                authors=paper.authors,
-                year=str(paper.year or "—"),
-                relevance_notes=paper.relevance_notes,
-                added_at=paper.added_at,
-            )
-            for paper in state.papers
-        ),
-        context_entries=tuple(
-            ContextRecord(
-                context_id=context.context_id,
-                key=context.key,
-                context_type=context.context_type,
-                value=context.value,
-                updated_at=context.updated_at,
-            )
-            for context in state.context_entries
-        ),
+        insights=insights,
+        papers=papers,
+        context_entries=context_entries,
         experiment_status_counts=dict(status_counts),
+        links_by_entity=links_by_entity,
+        actions_by_entity=actions_by_entity,
+        schema_version=str(snapshot["schema_version"]),
+        snapshot_owner=str(snapshot["snapshot_owner"]),
+        snapshot_state=str(snapshot["state_semantics"]["snapshot_state"]),
     )

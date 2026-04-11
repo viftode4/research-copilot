@@ -1,4 +1,4 @@
-"""Rich-powered terminal workflow dashboard."""
+"""Rich-powered v1a terminal workflow dashboard."""
 
 from __future__ import annotations
 
@@ -13,21 +13,38 @@ from rich.table import Table
 from rich.text import Text
 
 from research_copilot.tui.adapters import (
+    ContextRecord,
     DashboardSnapshot,
     ExperimentRecord,
+    InsightRecord,
     JobRecord,
+    LinkedRecord,
+    PaperRecord,
     build_dashboard_snapshot,
     format_timestamp,
 )
 
-SCREEN_ORDER = ("overview", "jobs", "experiments", "knowledge")
+SCREEN_ORDER = ("overview", "runs", "experiments", "research")
 SCREEN_TITLES = {
     "overview": "Overview",
-    "jobs": "Jobs / Logs",
+    "runs": "Runs",
     "experiments": "Experiments",
-    "knowledge": "Knowledge",
+    "research": "Research",
 }
-COMMAND_HINT = "1-4 switch views • h/l cycle tabs • j/k move • r refresh • q quit"
+PANE_ORDER = {
+    "overview": ("runs", "experiments"),
+    "runs": ("runs", "links"),
+    "experiments": ("experiments", "links"),
+    "research": ("insights", "papers", "context"),
+}
+COMMAND_HINT = "1-4 views • [/] cycle • Tab panes • j/k move • Enter open • g links • ? help • r refresh • q back • Q quit"
+
+
+def _first_link_of_type(links: tuple[LinkedRecord, ...], entity_type: str) -> LinkedRecord | None:
+    for link in links:
+        if link.entity_type == entity_type:
+            return link
+    return None
 
 
 @dataclass
@@ -38,8 +55,14 @@ class ResearchCopilotTUI:
 
     def __post_init__(self) -> None:
         self.screen_index = 0
+        self.pane_indexes = {screen: 0 for screen in SCREEN_ORDER}
         self.selected_job_index = 0
         self.selected_experiment_index = 0
+        self.selected_insight_index = 0
+        self.selected_paper_index = 0
+        self.selected_context_index = 0
+        self.show_help = False
+        self.show_links_modal = False
         self.snapshot = self.snapshot_loader()
         self.refresh()
 
@@ -47,70 +70,126 @@ class ResearchCopilotTUI:
     def current_screen(self) -> str:
         return SCREEN_ORDER[self.screen_index]
 
+    @property
+    def current_pane(self) -> str:
+        panes = PANE_ORDER[self.current_screen]
+        return panes[self.pane_indexes[self.current_screen] % len(panes)]
+
     def refresh(self) -> DashboardSnapshot:
         self.snapshot = self.snapshot_loader()
-        if self.snapshot.jobs:
-            self.selected_job_index = min(self.selected_job_index, len(self.snapshot.jobs) - 1)
-        else:
-            self.selected_job_index = 0
-        if self.snapshot.experiments:
-            self.selected_experiment_index = min(
-                self.selected_experiment_index, len(self.snapshot.experiments) - 1
-            )
-        else:
-            self.selected_experiment_index = 0
+        self.selected_job_index = self._bounded_index(self.selected_job_index, len(self.snapshot.jobs))
+        self.selected_experiment_index = self._bounded_index(
+            self.selected_experiment_index, len(self.snapshot.experiments)
+        )
+        self.selected_insight_index = self._bounded_index(
+            self.selected_insight_index, len(self.snapshot.insights)
+        )
+        self.selected_paper_index = self._bounded_index(self.selected_paper_index, len(self.snapshot.papers))
+        self.selected_context_index = self._bounded_index(
+            self.selected_context_index, len(self.snapshot.context_entries)
+        )
         return self.snapshot
 
     def set_screen(self, name: str) -> None:
         self.screen_index = SCREEN_ORDER.index(name)
+        self.pane_indexes[name] = min(self.pane_indexes[name], len(PANE_ORDER[name]) - 1)
+        self.show_links_modal = False
 
     def cycle_screen(self, step: int) -> None:
         self.screen_index = (self.screen_index + step) % len(SCREEN_ORDER)
+        self.show_links_modal = False
+
+    def cycle_pane(self, step: int) -> None:
+        panes = PANE_ORDER[self.current_screen]
+        self.pane_indexes[self.current_screen] = (self.pane_indexes[self.current_screen] + step) % len(panes)
 
     def move_selection(self, step: int) -> None:
-        if self.current_screen == "jobs" and self.snapshot.jobs:
+        pane = self.current_pane
+        if pane == "runs" and self.snapshot.jobs:
             self.selected_job_index = (self.selected_job_index + step) % len(self.snapshot.jobs)
-        elif self.current_screen == "experiments" and self.snapshot.experiments:
-            self.selected_experiment_index = (
-                self.selected_experiment_index + step
-            ) % len(self.snapshot.experiments)
+        elif pane == "experiments" and self.snapshot.experiments:
+            self.selected_experiment_index = (self.selected_experiment_index + step) % len(self.snapshot.experiments)
+        elif pane == "insights" and self.snapshot.insights:
+            self.selected_insight_index = (self.selected_insight_index + step) % len(self.snapshot.insights)
+        elif pane == "papers" and self.snapshot.papers:
+            self.selected_paper_index = (self.selected_paper_index + step) % len(self.snapshot.papers)
+        elif pane == "context" and self.snapshot.context_entries:
+            self.selected_context_index = (self.selected_context_index + step) % len(self.snapshot.context_entries)
 
     def handle_command(self, command: str) -> bool:
-        normalized = (command or "").strip().lower()
-        if normalized in {"q", "quit", "exit"}:
+        return self.handle_key(command)
+
+    def handle_key(self, key: str) -> bool:
+        raw = key or ""
+        if raw == "Q":
             return False
+        normalized = raw.strip().lower()
+        if normalized == "":
+            return True
+        if normalized == "q":
+            if self.show_help or self.show_links_modal:
+                self.show_help = False
+                self.show_links_modal = False
+                return True
+            return False
+        if normalized in {"?", "help"}:
+            self.show_help = not self.show_help
+            self.show_links_modal = False
+            return True
+        if normalized == "g":
+            self.show_links_modal = bool(self._selected_links())
+            self.show_help = False
+            return True
+        if self.show_help or self.show_links_modal:
+            return True
+
         if normalized in {"1", "overview"}:
             self.set_screen("overview")
-        elif normalized in {"2", "jobs"}:
-            self.set_screen("jobs")
+        elif normalized in {"2", "runs", "jobs"}:
+            self.set_screen("runs")
         elif normalized in {"3", "experiments"}:
             self.set_screen("experiments")
-        elif normalized in {"4", "knowledge"}:
-            self.set_screen("knowledge")
-        elif normalized in {"h", "left"}:
+        elif normalized in {"4", "research", "knowledge"}:
+            self.set_screen("research")
+        elif normalized in {"[", "h", "left"}:
             self.cycle_screen(-1)
-        elif normalized in {"l", "right"}:
+        elif normalized in {"]", "l", "right"}:
             self.cycle_screen(1)
+        elif normalized == "tab":
+            self.cycle_pane(1)
+        elif normalized == "shift+tab":
+            self.cycle_pane(-1)
         elif normalized in {"j", "down", "next"}:
             self.move_selection(1)
         elif normalized in {"k", "up", "prev"}:
             self.move_selection(-1)
         elif normalized in {"r", "refresh"}:
             self.refresh()
+        elif normalized in {"enter", "o"}:
+            self._open_focused_item()
+        elif normalized == "e":
+            self._jump_to_linked("experiment")
+        elif normalized == "p":
+            self._jump_to_linked_research("paper")
+        elif normalized == "i":
+            self._jump_to_linked_research("insight")
+        elif normalized == "c":
+            self._jump_to_linked_research("context")
         return True
 
     def run(self, console: Console | None = None) -> None:
         console = console or Console()
         self.refresh()
         if not console.is_interactive:
-            console.print(self.render())
+            console.print(self.render_static())
             return
 
         with console.screen(style="black on default"):
             while True:
                 console.clear()
                 console.print(self.render())
-                if not self.handle_command(console.input("\n[bold cyan]Command[/] > ")):
+                key = self._read_key()
+                if not self.handle_key(key):
                     break
 
     def render(self) -> RenderableType:
@@ -121,24 +200,32 @@ class ResearchCopilotTUI:
             self._render_footer(),
         )
 
+    def render_static(self) -> RenderableType:
+        return Group(
+            self._render_header(),
+            self._render_tabs(),
+            self._render_static_body(),
+            self._render_footer(),
+        )
+
     def _render_header(self) -> RenderableType:
         metrics = Columns(
             [
-                self._metric_panel("Active jobs", str(self.snapshot.active_jobs), "cyan"),
-                self._metric_panel("Total jobs", str(len(self.snapshot.jobs)), "blue"),
-                self._metric_panel(
-                    "Running experiments", str(self.snapshot.running_experiments), "magenta"
-                ),
-                self._metric_panel(
-                    "Completed experiments", str(self.snapshot.completed_experiments), "green"
-                ),
+                self._metric_panel("Active runs", str(self.snapshot.active_jobs), "cyan"),
+                self._metric_panel("Tracked runs", str(len(self.snapshot.jobs)), "blue"),
+                self._metric_panel("Running experiments", str(self.snapshot.running_experiments), "magenta"),
+                self._metric_panel("Completed experiments", str(self.snapshot.completed_experiments), "green"),
                 self._metric_panel("Insights", str(len(self.snapshot.insights)), "yellow"),
                 self._metric_panel("Papers", str(len(self.snapshot.papers)), "white"),
             ],
             equal=True,
             expand=True,
         )
-        return Panel(metrics, title="Research Copilot", subtitle="Terminal workflow dashboard")
+        subtitle = (
+            f"Terminal workflow dashboard • schema {self.snapshot.schema_version} • "
+            f"{self.snapshot.snapshot_state}"
+        )
+        return Panel(metrics, title="Research Copilot", subtitle=subtitle)
 
     def _render_tabs(self) -> RenderableType:
         tabs = Text()
@@ -150,87 +237,138 @@ class ResearchCopilotTUI:
         return tabs
 
     def _render_body(self) -> RenderableType:
+        if self.show_help:
+            return self._render_help_modal()
+        if self.show_links_modal:
+            return self._render_links_modal()
         if self.current_screen == "overview":
             return self._render_overview()
-        if self.current_screen == "jobs":
-            return self._render_jobs_screen()
+        if self.current_screen == "runs":
+            return self._render_runs_screen()
         if self.current_screen == "experiments":
             return self._render_experiments_screen()
-        return self._render_knowledge_screen()
+        return self._render_research_screen()
+
+    def _render_static_body(self) -> RenderableType:
+        if self.current_screen != "overview":
+            return self._render_body()
+        return Group(
+            Panel(self._render_jobs_table(limit=8), title="Recent runs"),
+            Panel(self._render_experiments_table(limit=8), title="Recent experiments"),
+            Panel(self._render_selected_summary() if (self.snapshot.jobs or self.snapshot.experiments) else self._render_getting_started(), title="Selected focus" if (self.snapshot.jobs or self.snapshot.experiments) else "Getting started"),
+        )
 
     def _render_overview(self) -> RenderableType:
-        layout = Layout()
-        layout.split_column(
-            Layout(name="top", ratio=2),
-            Layout(name="bottom", ratio=1),
-        )
-        layout["top"].split_row(
-            Layout(Panel(self._render_jobs_table(limit=8), title="Recent jobs"), name="jobs"),
-            Layout(
-                Panel(self._render_experiments_table(limit=8), title="Recent experiments"),
-                name="experiments",
-            ),
-        )
         if not self.snapshot.jobs and not self.snapshot.experiments:
-            layout["bottom"].update(Panel(self._render_getting_started(), title="Getting started"))
-            return layout
+            return Panel(self._render_getting_started(), title="Getting started")
 
-        layout["bottom"].split_row(
+        layout = Layout()
+        layout.split_row(
             Layout(
-                Panel(self._render_job_detail(self._selected_job()), title="Selected job"),
-                name="job_detail",
+                Panel(
+                    self._render_jobs_table(limit=8),
+                    title="Runs",
+                    border_style=self._pane_style("runs"),
+                ),
+                ratio=2,
             ),
             Layout(
                 Panel(
-                    self._render_experiment_detail(self._selected_experiment()),
-                    title="Selected experiment",
+                    self._render_experiments_table(limit=8),
+                    title="Experiments",
+                    border_style=self._pane_style("experiments"),
                 ),
-                name="experiment_detail",
+                ratio=2,
             ),
+            Layout(Panel(self._render_selected_summary(), title="Selected focus", border_style="cyan"), ratio=3),
         )
         return layout
 
-    def _render_jobs_screen(self) -> RenderableType:
+    def _render_runs_screen(self) -> RenderableType:
         layout = Layout()
         layout.split_row(
-            Layout(Panel(self._render_jobs_table(limit=20), title="Jobs"), ratio=2),
-            Layout(Panel(self._render_job_detail(self._selected_job()), title="Job detail"), ratio=3),
+            Layout(
+                Panel(
+                    self._render_jobs_table(limit=20),
+                    title="Runs",
+                    border_style=self._pane_style("runs"),
+                ),
+                ratio=2,
+            ),
+            Layout(Panel(self._render_job_detail(self._selected_job()), title="Run detail"), ratio=3),
+            Layout(
+                Panel(
+                    self._render_links_summary(self._selected_job_entity_id()),
+                    title="Linked research",
+                    border_style=self._pane_style("links"),
+                ),
+                ratio=2,
+            ),
         )
         return layout
 
     def _render_experiments_screen(self) -> RenderableType:
         layout = Layout()
         layout.split_row(
-            Layout(Panel(self._render_experiments_table(limit=20), title="Experiments"), ratio=2),
             Layout(
                 Panel(
-                    self._render_experiment_detail(self._selected_experiment()),
-                    title="Experiment detail",
+                    self._render_experiments_table(limit=20),
+                    title="Experiments",
+                    border_style=self._pane_style("experiments"),
                 ),
-                ratio=3,
+                ratio=2,
+            ),
+            Layout(Panel(self._render_experiment_detail(self._selected_experiment()), title="Experiment detail"), ratio=3),
+            Layout(
+                Panel(
+                    self._render_links_summary(self._selected_experiment_entity_id()),
+                    title="Linked research",
+                    border_style=self._pane_style("links"),
+                ),
+                ratio=2,
             ),
         )
         return layout
 
-    def _render_knowledge_screen(self) -> RenderableType:
+    def _render_research_screen(self) -> RenderableType:
         layout = Layout()
-        layout.split_column(
-            Layout(Panel(self._render_insights_table(), title="Insights"), ratio=2),
-            Layout(name="bottom", ratio=2),
+        layout.split_column(Layout(name="lists", ratio=2), Layout(name="detail", ratio=1))
+        layout["lists"].split_row(
+            Layout(
+                Panel(
+                    self._render_insights_table(),
+                    title="Insights",
+                    border_style=self._pane_style("insights"),
+                ),
+                ratio=2,
+            ),
+            Layout(
+                Panel(
+                    self._render_papers_table(),
+                    title="Papers",
+                    border_style=self._pane_style("papers"),
+                ),
+                ratio=2,
+            ),
+            Layout(
+                Panel(
+                    self._render_context_table(),
+                    title="Context",
+                    border_style=self._pane_style("context"),
+                ),
+                ratio=2,
+            ),
         )
-        layout["bottom"].split_row(
-            Layout(Panel(self._render_papers_table(), title="Saved papers"), ratio=2),
-            Layout(Panel(self._render_context_table(), title="Research context"), ratio=2),
-        )
+        layout["detail"].update(Panel(self._render_selected_research_detail(), title="Research detail"))
         return layout
 
     def _render_jobs_table(self, limit: int) -> RenderableType:
         if not self.snapshot.jobs:
-            return Text("No jobs yet. Submit or sync a run to monitor it here.", style="dim")
+            return Text("No runs yet. Submit or sync a run to monitor it here.", style="dim")
 
         table = Table(expand=True)
         table.add_column("Sel", width=3)
-        table.add_column("Job", style="bold")
+        table.add_column("Run", style="bold")
         table.add_column("Status")
         table.add_column("GPU", justify="right", width=5)
         table.add_column("Submitted", width=16)
@@ -268,11 +406,12 @@ class ResearchCopilotTUI:
 
     def _render_job_detail(self, job: JobRecord | None) -> RenderableType:
         if job is None:
-            return Text("No job selected.", style="dim")
+            return Text("No run selected.", style="dim")
 
         info = Table.grid(expand=True)
         info.add_column(style="bold cyan", width=16)
         info.add_column()
+        info.add_row("Run ID", job.run_id)
         info.add_row("Job ID", job.job_id)
         info.add_row("Name", job.name)
         info.add_row("Status", job.status)
@@ -284,10 +423,10 @@ class ResearchCopilotTUI:
         info.add_row("Completed", format_timestamp(job.completed_at or ""))
         return Group(
             info,
-            Text("\nLog tail", style="bold"),
+            Text("\nLog summary", style="bold"),
             Text(job.log_tail, style="white"),
-            Text("\nStderr", style="bold"),
-            Text(job.error_tail, style="dim"),
+            Text("\nStderr summary", style="bold"),
+            Text(job.error_tail or "(no stderr)", style="dim"),
         )
 
     def _render_experiment_detail(self, experiment: ExperimentRecord | None) -> RenderableType:
@@ -305,12 +444,11 @@ class ResearchCopilotTUI:
         info.add_row("Tags", ", ".join(experiment.tags) if experiment.tags else "—")
         info.add_row("Updated", format_timestamp(experiment.updated_at))
         info.add_row("W&B run", experiment.wandb_run_id or "—")
-        info.add_row("Slurm job", experiment.slurm_job_id or "—")
-        hypothesis = experiment.hypothesis or experiment.description or "No experiment notes yet."
+        info.add_row("Linked job", experiment.slurm_job_id or "—")
         return Group(
             info,
             Text("\nHypothesis / notes", style="bold"),
-            Text(hypothesis),
+            Text(experiment.hypothesis or experiment.description or "No experiment notes yet."),
             Text("\nResult snapshot", style="bold"),
             Text(experiment.results_summary),
         )
@@ -318,48 +456,144 @@ class ResearchCopilotTUI:
     def _render_insights_table(self) -> RenderableType:
         if not self.snapshot.insights:
             return Text("No insights captured yet.", style="dim")
-
         table = Table(expand=True)
+        table.add_column("Sel", width=3)
         table.add_column("Title", style="bold")
         table.add_column("Category")
         table.add_column("Confidence", justify="right")
-        table.add_column("Summary")
-        for insight in self.snapshot.insights:
-            table.add_row(
-                insight.title,
-                insight.category,
-                insight.confidence,
-                insight.content[:70] + ("…" if len(insight.content) > 70 else ""),
-            )
+        for index, insight in enumerate(self.snapshot.insights):
+            selected = "▶" if index == self.selected_insight_index else " "
+            table.add_row(selected, insight.title, insight.category, insight.confidence)
         return table
 
     def _render_papers_table(self) -> RenderableType:
         if not self.snapshot.papers:
             return Text("No saved papers yet.", style="dim")
-
         table = Table(expand=True)
+        table.add_column("Sel", width=3)
         table.add_column("Title", style="bold")
         table.add_column("Authors")
         table.add_column("Year", width=6)
-        for paper in self.snapshot.papers:
+        for index, paper in enumerate(self.snapshot.papers):
+            selected = "▶" if index == self.selected_paper_index else " "
             authors = ", ".join(paper.authors[:2]) if paper.authors else "—"
             if len(paper.authors) > 2:
                 authors += " +"
-            table.add_row(paper.title, authors, paper.year)
+            table.add_row(selected, paper.title, authors, paper.year)
         return table
 
     def _render_context_table(self) -> RenderableType:
         if not self.snapshot.context_entries:
             return Text("No research context stored yet.", style="dim")
-
         table = Table(expand=True)
+        table.add_column("Sel", width=3)
         table.add_column("Key", style="bold")
         table.add_column("Type")
         table.add_column("Value")
-        for context in self.snapshot.context_entries:
-            value = context.value[:80] + ("…" if len(context.value) > 80 else "")
-            table.add_row(context.key, context.context_type, value)
+        for index, context in enumerate(self.snapshot.context_entries):
+            selected = "▶" if index == self.selected_context_index else " "
+            value = context.value[:48] + ("…" if len(context.value) > 48 else "")
+            table.add_row(selected, context.key, context.context_type, value)
         return table
+
+    def _render_links_summary(self, entity_id: str | None) -> RenderableType:
+        if not entity_id:
+            return Text("No linked entity selected.", style="dim")
+        links = self.snapshot.links_by_entity.get(entity_id, ())
+        if not links:
+            return Text("No linked research or runs for this selection.", style="dim")
+        table = Table(expand=True)
+        table.add_column("Type", width=10)
+        table.add_column("Relation", width=24)
+        table.add_column("Target", style="bold")
+        for link in links[:8]:
+            table.add_row(link.entity_type, link.relation, link.title)
+        actions = self.snapshot.actions_by_entity.get(entity_id, ())
+        if actions:
+            return Group(table, Text("\nActions: " + " • ".join(actions), style="dim"))
+        return table
+
+    def _render_selected_summary(self) -> RenderableType:
+        if self.current_pane == "experiments":
+            return self._render_experiment_detail(self._selected_experiment())
+        return Group(
+            self._render_job_detail(self._selected_job()),
+            Text("\nLinked research", style="bold"),
+            self._render_links_summary(self._selected_job_entity_id()),
+        )
+
+    def _render_selected_research_detail(self) -> RenderableType:
+        if self.current_pane == "papers":
+            return self._render_paper_detail(self._selected_paper())
+        if self.current_pane == "context":
+            return self._render_context_detail(self._selected_context())
+        return self._render_insight_detail(self._selected_insight())
+
+    def _render_insight_detail(self, insight: InsightRecord | None) -> RenderableType:
+        if insight is None:
+            return Text("No insight selected.", style="dim")
+        return Group(
+            Text(insight.title, style="bold"),
+            Text(f"Category: {insight.category} • Confidence: {insight.confidence}", style="dim"),
+            Text(""),
+            Text(insight.content),
+            Text(""),
+            self._render_links_summary(insight.entity_id),
+        )
+
+    def _render_paper_detail(self, paper: PaperRecord | None) -> RenderableType:
+        if paper is None:
+            return Text("No paper selected.", style="dim")
+        authors = ", ".join(paper.authors) if paper.authors else "—"
+        return Group(
+            Text(paper.title, style="bold"),
+            Text(f"Authors: {authors} • Year: {paper.year}", style="dim"),
+            Text(""),
+            Text(paper.relevance_notes or "No relevance notes stored."),
+            Text(""),
+            self._render_links_summary(paper.entity_id),
+        )
+
+    def _render_context_detail(self, context: ContextRecord | None) -> RenderableType:
+        if context is None:
+            return Text("No context selected.", style="dim")
+        return Group(
+            Text(context.key, style="bold"),
+            Text(f"Type: {context.context_type}", style="dim"),
+            Text(""),
+            Text(context.value),
+            Text(""),
+            self._render_links_summary(context.entity_id),
+        )
+
+    def _render_help_modal(self) -> RenderableType:
+        help_lines = Group(
+            Text("v1a key bindings", style="bold"),
+            Text("1-4 switch screens"),
+            Text("[ / ] cycle screens"),
+            Text("Tab cycle panes"),
+            Text("j / k move selection"),
+            Text("Enter or o open focused item"),
+            Text("g open links modal"),
+            Text("e / p / i / c jump to linked experiment / papers / insights / context"),
+            Text("r refresh"),
+            Text("q close help or exit"),
+            Text("Q quit"),
+        )
+        return Panel(help_lines, title="Help", border_style="cyan")
+
+    def _render_links_modal(self) -> RenderableType:
+        links = self._selected_links()
+        if not links:
+            return Panel(Text("No links available for the current selection.", style="dim"), title="Links")
+        table = Table(expand=True)
+        table.add_column("Type", width=10)
+        table.add_column("Relation", width=24)
+        table.add_column("Target", style="bold")
+        table.add_column("Status", width=12)
+        for link in links:
+            table.add_row(link.entity_type, link.relation, link.title, link.status or "—")
+        return Panel(table, title="Links modal", border_style="cyan")
 
     def _render_footer(self) -> RenderableType:
         selected = self._focus_label()
@@ -373,38 +607,64 @@ class ResearchCopilotTUI:
             Text("Use the solo workflow commands to seed the dashboard:", style="bold"),
             Text("  1. research-copilot workflow onboard"),
             Text("  2. research-copilot workflow triage --json"),
-            Text("  3. research-copilot workflow run-experiment --command \"python ...\" --json"),
+            Text('  3. research-copilot workflow run-experiment --command "python ..." --json'),
             Text("  4. research-copilot workflow review-results <experiment-id> --json"),
             Text("Proof script: docs/seeded-solo-cli-scenario.md", style="dim"),
         )
 
     def _selected_job(self) -> JobRecord | None:
-        if not self.snapshot.jobs:
-            return None
-        return self.snapshot.jobs[self.selected_job_index]
+        return self.snapshot.jobs[self.selected_job_index] if self.snapshot.jobs else None
+
+    def _selected_job_entity_id(self) -> str | None:
+        job = self._selected_job()
+        return job.entity_id if job else None
 
     def _selected_experiment(self) -> ExperimentRecord | None:
-        if not self.snapshot.experiments:
-            return None
-        return self.snapshot.experiments[self.selected_experiment_index]
+        return self.snapshot.experiments[self.selected_experiment_index] if self.snapshot.experiments else None
+
+    def _selected_experiment_entity_id(self) -> str | None:
+        experiment = self._selected_experiment()
+        return experiment.entity_id if experiment else None
+
+    def _selected_insight(self) -> InsightRecord | None:
+        return self.snapshot.insights[self.selected_insight_index] if self.snapshot.insights else None
+
+    def _selected_paper(self) -> PaperRecord | None:
+        return self.snapshot.papers[self.selected_paper_index] if self.snapshot.papers else None
+
+    def _selected_context(self) -> ContextRecord | None:
+        return self.snapshot.context_entries[self.selected_context_index] if self.snapshot.context_entries else None
+
+    def _selected_entity_id(self) -> str | None:
+        if self.current_screen == "experiments":
+            return self._selected_experiment_entity_id()
+        if self.current_screen == "research":
+            if self.current_pane == "papers":
+                selected = self._selected_paper()
+                return selected.entity_id if selected else None
+            if self.current_pane == "context":
+                selected = self._selected_context()
+                return selected.entity_id if selected else None
+            selected = self._selected_insight()
+            return selected.entity_id if selected else None
+        return self._selected_job_entity_id()
+
+    def _selected_links(self) -> tuple[LinkedRecord, ...]:
+        entity_id = self._selected_entity_id()
+        return self.snapshot.links_by_entity.get(entity_id, ()) if entity_id else ()
 
     def _metric_panel(self, label: str, value: str, style: str) -> RenderableType:
         return Panel(Text(value, justify="center", style=f"bold {style}"), title=label)
 
     def _focus_label(self) -> str:
-        if self.current_screen == "jobs":
-            if self.snapshot.jobs:
-                return f"job {self.selected_job_index + 1}/{len(self.snapshot.jobs)}"
-            return "jobs"
-        if self.current_screen == "experiments":
-            if self.snapshot.experiments:
-                return f"experiment {self.selected_experiment_index + 1}/{len(self.snapshot.experiments)}"
-            return "experiments"
-        return self.current_screen
+        return f"{self.current_screen}/{self.current_pane}"
+
+    def _pane_style(self, pane: str) -> str:
+        return "cyan" if self.current_pane == pane else "grey35"
 
     def _status_style(self, value: str) -> str:
         lowered = value.lower()
-        if lowered in {"running", "pending"}:
+        if lowered in {"running", "pending", "planned"}:
             return "bold yellow"
         if lowered in {"completed"}:
             return "bold green"
@@ -412,9 +672,125 @@ class ResearchCopilotTUI:
             return "bold red"
         return "bold white"
 
+    def _open_focused_item(self) -> None:
+        if self.current_screen == "overview":
+            self.set_screen("experiments" if self.current_pane == "experiments" else "runs")
+            return
+        if self.current_screen == "runs":
+            linked_experiment = _first_link_of_type(self._selected_links(), "experiment")
+            if linked_experiment is not None:
+                self.set_screen("experiments")
+                self._select_experiment_entity(linked_experiment.entity_id)
+                return
+        if self._selected_links():
+            self.show_links_modal = True
+
+    def _jump_to_linked(self, entity_type: str) -> None:
+        linked = _first_link_of_type(self._selected_links(), entity_type)
+        if linked is None:
+            return
+        if entity_type == "experiment":
+            self.set_screen("experiments")
+            self._select_experiment_entity(linked.entity_id)
+
+    def _jump_to_linked_research(self, entity_type: str) -> None:
+        linked = _first_link_of_type(self._selected_links(), entity_type)
+        if linked is None:
+            return
+        self.set_screen("research")
+        if entity_type == "paper":
+            self.pane_indexes["research"] = PANE_ORDER["research"].index("papers")
+            self._select_paper_entity(linked.entity_id)
+        elif entity_type == "context":
+            self.pane_indexes["research"] = PANE_ORDER["research"].index("context")
+            self._select_context_entity(linked.entity_id)
+        else:
+            self.pane_indexes["research"] = PANE_ORDER["research"].index("insights")
+            self._select_insight_entity(linked.entity_id)
+
+    def _select_experiment_entity(self, entity_id: str) -> None:
+        for index, experiment in enumerate(self.snapshot.experiments):
+            if experiment.entity_id == entity_id:
+                self.selected_experiment_index = index
+                return
+
+    def _select_insight_entity(self, entity_id: str) -> None:
+        for index, insight in enumerate(self.snapshot.insights):
+            if insight.entity_id == entity_id:
+                self.selected_insight_index = index
+                return
+
+    def _select_paper_entity(self, entity_id: str) -> None:
+        for index, paper in enumerate(self.snapshot.papers):
+            if paper.entity_id == entity_id:
+                self.selected_paper_index = index
+                return
+
+    def _select_context_entity(self, entity_id: str) -> None:
+        for index, context in enumerate(self.snapshot.context_entries):
+            if context.entity_id == entity_id:
+                self.selected_context_index = index
+                return
+
+    def _bounded_index(self, value: int, length: int) -> int:
+        return min(value, length - 1) if length else 0
+
+    def _read_key(self) -> str:
+        try:
+            import msvcrt
+
+            first = msvcrt.getwch()
+            if first in {"\x00", "\xe0"}:
+                second = msvcrt.getwch()
+                return {
+                    "H": "up",
+                    "P": "down",
+                    "K": "left",
+                    "M": "right",
+                    "\x0f": "shift+tab",
+                }.get(second, "")
+            if first == "\r":
+                return "enter"
+            if first == "\t":
+                return "tab"
+            return first
+        except ImportError:
+            import select
+            import sys
+            import termios
+            import tty
+
+            stream = sys.stdin.fileno()
+            original = termios.tcgetattr(stream)
+            try:
+                tty.setraw(stream)
+                first = sys.stdin.read(1)
+                if first == "\x1b":
+                    ready, _, _ = select.select([sys.stdin], [], [], 0.01)
+                    if ready:
+                        second = sys.stdin.read(1)
+                        if second == "[":
+                            third = sys.stdin.read(1)
+                            return {
+                                "A": "up",
+                                "B": "down",
+                                "C": "right",
+                                "D": "left",
+                                "Z": "shift+tab",
+                            }.get(third, "")
+                    return "escape"
+                if first == "\r":
+                    return "enter"
+                if first == "\t":
+                    return "tab"
+                return first
+            finally:
+                termios.tcsetattr(stream, termios.TCSADRAIN, original)
+
 
 def launch_tui(console: Console | None = None) -> ResearchCopilotTUI:
     """Create and run the terminal dashboard."""
+
     app = ResearchCopilotTUI()
     app.run(console=console)
     return app

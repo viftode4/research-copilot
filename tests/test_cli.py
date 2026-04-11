@@ -39,7 +39,7 @@ def test_default_cli_invocation_renders_tui_snapshot():
     assert result.exit_code == 0
     assert "Research Copilot" in result.output
     assert "Terminal workflow dashboard" in result.output
-    assert "No jobs yet" in result.output
+    assert "No runs yet" in result.output
 
 
 def test_default_cli_invocation_in_uninitialized_workspace_shows_bootstrap_not_tui(
@@ -302,7 +302,7 @@ def test_tui_command_renders_seeded_workflow_views():
 
     assert result.exit_code == 0
     assert "pfn-train" in result.output
-    assert "Active jobs" in result.output
+    assert "Active runs" in result.output
     assert "Recent experiments" in result.output
 
 
