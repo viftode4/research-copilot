@@ -362,13 +362,7 @@ class ResearchCopilotTUI:
         return table
 
     def _render_footer(self) -> RenderableType:
-        selected = (
-            f"job {self.selected_job_index + 1}/{len(self.snapshot.jobs)}"
-            if self.current_screen == "jobs" and self.snapshot.jobs
-            else f"experiment {self.selected_experiment_index + 1}/{len(self.snapshot.experiments)}"
-            if self.current_screen == "experiments" and self.snapshot.experiments
-            else "overview"
-        )
+        selected = self._focus_label()
         return Panel(
             Text(f"{COMMAND_HINT} • focus: {selected}", style="bold cyan"),
             border_style="cyan",
@@ -396,6 +390,17 @@ class ResearchCopilotTUI:
 
     def _metric_panel(self, label: str, value: str, style: str) -> RenderableType:
         return Panel(Text(value, justify="center", style=f"bold {style}"), title=label)
+
+    def _focus_label(self) -> str:
+        if self.current_screen == "jobs":
+            if self.snapshot.jobs:
+                return f"job {self.selected_job_index + 1}/{len(self.snapshot.jobs)}"
+            return "jobs"
+        if self.current_screen == "experiments":
+            if self.snapshot.experiments:
+                return f"experiment {self.selected_experiment_index + 1}/{len(self.snapshot.experiments)}"
+            return "experiments"
+        return self.current_screen
 
     def _status_style(self, value: str) -> str:
         lowered = value.lower()

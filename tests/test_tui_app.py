@@ -19,6 +19,12 @@ def _empty_snapshot() -> DashboardSnapshot:
     )
 
 
+def _render_text(renderable) -> str:
+    console = Console(record=True, width=120)
+    console.print(renderable)
+    return console.export_text()
+
+
 def test_tui_navigation_commands_cycle_views():
     app = ResearchCopilotTUI(snapshot_loader=_empty_snapshot)
 
@@ -43,13 +49,16 @@ def test_tui_quit_command_stops_loop():
     assert app.handle_command("q") is False
 
 
-def test_empty_overview_render_shows_getting_started_guidance():
+def test_tui_footer_uses_current_screen_when_no_selection_exists():
     app = ResearchCopilotTUI(snapshot_loader=_empty_snapshot)
-    console = Console(record=True, width=120)
 
-    console.print(app.render())
-    rendered = console.export_text()
+    assert "focus: overview" in _render_text(app._render_footer())
 
-    assert "Getting started" in rendered
-    assert "workflow onboard" in rendered
-    assert "workflow triage --json" in rendered
+    app.handle_command("2")
+    assert "focus: jobs" in _render_text(app._render_footer())
+
+    app.handle_command("3")
+    assert "focus: experiments" in _render_text(app._render_footer())
+
+    app.handle_command("4")
+    assert "focus: knowledge" in _render_text(app._render_footer())
