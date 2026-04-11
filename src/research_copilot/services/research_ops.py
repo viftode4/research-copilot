@@ -109,6 +109,10 @@ class ResearchOpsState:
     context_entries: tuple[ContextState, ...]
     experiment_status_counts: dict[str, int]
 
+    @property
+    def active_jobs(self) -> int:
+        return sum(1 for job in self.jobs if job.status in ACTIVE_JOB_STATUSES)
+
 
 
 def _decode_response(response: dict[str, Any]) -> Any:
@@ -142,6 +146,14 @@ def _job_sort_key(job: JobState) -> tuple[int, str]:
 def _experiment_sort_key(experiment: Mapping[str, Any]) -> tuple[int, str]:
     updated = _parse_timestamp(experiment.get("updated_at", "") or experiment.get("created_at", ""))
     return (int(updated.timestamp()) if updated else 0, str(experiment.get("id", "")))
+
+
+def _normalize_results(value: Any) -> dict[str, Any]:
+    if isinstance(value, Mapping):
+        return dict(value)
+    if value in (None, "", {}):
+        return {}
+    return {"raw": value}
 
 
 class ResearchOpsService:
@@ -219,7 +231,7 @@ class ResearchOpsService:
                     tags=tuple(experiment.get("tags", [])),
                     created_at=str(experiment.get("created_at", "")),
                     updated_at=str(experiment.get("updated_at", experiment.get("created_at", ""))),
-                    results=dict(experiment.get("results", {}) or {}),
+                    results=_normalize_results(experiment.get("results", {})),
                     wandb_run_id=str(experiment.get("wandb_run_id", "")),
                     linked_job_id=linked_job_id,
                     linked_job_status=linked_job.status if linked_job else None,
