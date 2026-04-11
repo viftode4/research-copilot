@@ -29,6 +29,10 @@ def clean_store():
     _store["papers"].clear()
     _store["context"].clear()
     yield
+    _store["experiments"].clear()
+    _store["insights"].clear()
+    _store["papers"].clear()
+    _store["context"].clear()
 
 
 class TestExperiments:
