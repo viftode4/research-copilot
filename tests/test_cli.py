@@ -84,6 +84,8 @@ def test_status_and_top_level_help_reflect_terminal_first_surface():
     assert status_result.exit_code == 0
     assert "research-copilot tui" in status_result.output
     assert "Workflow Snapshot" in status_result.output
+    assert "Onboarding:" in status_result.output
+    assert "research-copilot workflow onboard" in status_result.output
     assert help_result.exit_code == 0
     assert "serve" not in help_result.output
     assert "workflow" in help_result.output
@@ -95,6 +97,44 @@ def test_status_and_top_level_help_reflect_terminal_first_surface():
     assert "snapshot" in help_result.output
     assert "workflow onboard" in help_result.output
     assert "cli-scenario.md" in help_result.output
+
+
+def test_status_surfaces_saved_onboarding_contract(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+
+    onboard_result = runner.invoke(
+        cli,
+        [
+            "workflow",
+            "onboard",
+            "--goal",
+            "Probe random-data baseline behavior",
+            "--success-criteria",
+            "Persist one reviewed run",
+            "--active-profile",
+            "goal-chaser",
+            "--autonomy-level",
+            "bounded",
+            "--allowed-action",
+            "launch runs",
+            "--constraint",
+            "single-user only",
+            "--stop-condition",
+            "stop after one reviewed run",
+            "--json",
+        ],
+    )
+
+    assert onboard_result.exit_code == 0, onboard_result.output
+
+    status_result = runner.invoke(cli, ["status"])
+
+    assert status_result.exit_code == 0
+    assert "State:            Configured" in status_result.output
+    assert "Probe random-data baseline behavior" in status_result.output
+    assert "goal-chaser" in status_result.output
+    assert "research-copilot workflow triage" in status_result.output
 
 
 
