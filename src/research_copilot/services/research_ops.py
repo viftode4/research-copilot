@@ -1,280 +1,336 @@
-"""Shared read service for research ops state used by CLI, TUI, and workflows."""
+"""Shared service boundary for CLI/TUI research-ops state access."""
 
 from __future__ import annotations
 
-from collections import Counter
-from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
-from datetime import datetime
+import json
 from typing import Any
 
-from research_copilot.mcp_servers.knowledge_base import _store
-from research_copilot.mcp_servers.slurm import MockJob, _mock_jobs
+from research_copilot.mcp_servers.knowledge_base import (
+    _store,
+    handle_get_experiment,
+    handle_get_research_context,
+    handle_query_experiments,
+    handle_query_insights,
+    handle_set_research_context,
+    handle_store_experiment,
+    handle_store_insight,
+    handle_store_paper,
+    handle_update_experiment,
+)
+from research_copilot.mcp_servers.literature import handle_search_papers
+from research_copilot.mcp_servers.slurm import (
+    _mock_jobs,
+    handle_cancel_job,
+    handle_get_job_logs,
+    handle_submit_job,
+)
+from research_copilot.services.workflow_snapshot import build_workflow_snapshot
 
-ACTIVE_JOB_STATUSES = frozenset({"PENDING", "RUNNING"})
-ACTIVE_EXPERIMENT_STATUSES = frozenset({"planned", "queued", "running"})
 
-
-def _parse_timestamp(value: str) -> datetime | None:
-    if not value:
-        return None
+def _decode_response(response: dict[str, Any]) -> Any:
+    content = response.get("content", [])
+    if not content:
+        return {}
+    text = content[0].get("text", "")
     try:
-        return datetime.fromisoformat(value.replace("Z", "+00:00"))
-    except ValueError:
-        return None
+        return json.loads(text)
+    except json.JSONDecodeError:
+        return {"message": text}
 
 
-def _timestamp_sort_key(record: Mapping[str, Any], *fields: str) -> tuple[int, str]:
-    for field in fields:
-        parsed = _parse_timestamp(str(record.get(field, "") or ""))
-        if parsed:
-            return (int(parsed.timestamp()), str(record.get("id", "")))
-    return (0, str(record.get("id", "")))
+async def get_snapshot(*, max_items: int = 5) -> dict[str, Any]:
+    return build_workflow_snapshot(max_items=max_items)
 
 
-def _job_sort_key(job: MockJob) -> tuple[int, str]:
-    parsed = _parse_timestamp(job.submitted_at)
-    return (int(parsed.timestamp()) if parsed else 0, job.job_id)
-
-
-@dataclass(frozen=True)
-class JobState:
-    job_id: str
-    name: str
-    status: str
-    partition: str
-    gpus: int
-    submitted_at: str
-    started_at: str | None
-    completed_at: str | None
-    time_limit: str
-    stdout: str
-    stderr: str
-
-    @property
-    def is_active(self) -> bool:
-        return self.status in ACTIVE_JOB_STATUSES
-
-
-@dataclass(frozen=True)
-class ExperimentState:
-    experiment_id: str
-    name: str
-    status: str
-    hypothesis: str
-    description: str
-    dataset: str
-    model_type: str
-    tags: tuple[str, ...]
-    results: dict[str, Any]
-    linked_job_id: str | None
-    linked_job_status: str | None
-    wandb_run_id: str
-    created_at: str
-    updated_at: str
-
-    @property
-    def is_active(self) -> bool:
-        return self.status.lower() in ACTIVE_EXPERIMENT_STATUSES
-
-
-@dataclass(frozen=True)
-class InsightState:
-    insight_id: str
-    title: str
-    category: str
-    confidence: Any
-    content: str
-    created_at: str
-
-
-@dataclass(frozen=True)
-class PaperState:
-    paper_id: str
-    title: str
-    authors: tuple[str, ...]
-    year: Any
-    relevance_notes: str
-    tags: tuple[str, ...]
-    added_at: str
-
-
-@dataclass(frozen=True)
-class ContextState:
-    context_id: str
-    key: str
-    context_type: str
-    value: str
-    updated_at: str
-
-
-@dataclass(frozen=True)
-class ResearchOpsState:
-    jobs: tuple[JobState, ...]
-    experiments: tuple[ExperimentState, ...]
-    insights: tuple[InsightState, ...]
-    papers: tuple[PaperState, ...]
-    context_entries: tuple[ContextState, ...]
-
-    @property
-    def active_jobs(self) -> int:
-        return sum(1 for job in self.jobs if job.is_active)
-
-    @property
-    def experiment_status_counts(self) -> dict[str, int]:
-        return dict(Counter(experiment.status for experiment in self.experiments))
-
-
-class ResearchOpsService:
-    """Read-only service boundary over the current backing stores."""
-
-    def __init__(
-        self,
-        *,
-        store: Mapping[str, Sequence[Mapping[str, Any]]] | None = None,
-        jobs: Mapping[str, MockJob] | None = None,
-    ) -> None:
-        self._store = store or _store
-        self._jobs = jobs or _mock_jobs
-
-    def list_jobs(self, *, limit: int | None = None) -> tuple[JobState, ...]:
-        jobs = sorted(self._jobs.values(), key=_job_sort_key, reverse=True)
-        if limit is not None:
-            jobs = jobs[:limit]
-
-        return tuple(
-            JobState(
-                job_id=job.job_id,
-                name=job.name,
-                status=job.status,
-                partition=job.partition,
-                gpus=job.gpus,
-                submitted_at=job.submitted_at,
-                started_at=job.started_at,
-                completed_at=job.completed_at,
-                time_limit=job.time_limit,
-                stdout=job.output,
-                stderr=job.error,
-            )
+async def list_jobs(*, status_filter: str = "", limit: int = 20) -> dict[str, Any]:
+    jobs = list(_mock_jobs.values())
+    if status_filter:
+        jobs = [job for job in jobs if job.status == status_filter.upper()]
+    jobs = jobs[-limit:]
+    return {
+        "total": len(jobs),
+        "jobs": [
+            {
+                "job_id": job.job_id,
+                "name": job.name,
+                "status": job.status,
+                "partition": job.partition,
+                "gpus": job.gpus,
+                "time_limit": job.time_limit,
+                "submitted_at": job.submitted_at,
+                "started_at": job.started_at,
+                "completed_at": job.completed_at,
+                "workflow_name": job.workflow_name,
+                "experiment_id": job.experiment_id,
+                "submitted_by": job.submitted_by,
+            }
             for job in jobs
+        ],
+    }
+
+
+async def get_job(*, job_id: str) -> dict[str, Any]:
+    job = _mock_jobs.get(job_id)
+    if not job:
+        raise ValueError(f"Job {job_id} not found")
+    return {
+        "job_id": job.job_id,
+        "name": job.name,
+        "status": job.status,
+        "partition": job.partition,
+        "gpus": job.gpus,
+        "time_limit": job.time_limit,
+        "submitted_at": job.submitted_at,
+        "started_at": job.started_at,
+        "completed_at": job.completed_at,
+        "workflow_name": job.workflow_name,
+        "experiment_id": job.experiment_id,
+        "submitted_by": job.submitted_by,
+        "output": job.output,
+        "error": job.error,
+    }
+
+
+async def get_job_logs(*, job_id: str, lines: int = 100) -> dict[str, Any]:
+    return _decode_response(await handle_get_job_logs({"job_id": job_id, "lines": lines}))
+
+
+async def submit_job(
+    *,
+    job_name: str,
+    script: str,
+    partition: str = "gpu",
+    gpus: int = 1,
+    time_limit: str = "04:00:00",
+    submitted_by: str = "",
+    workflow_name: str = "",
+    experiment_id: str = "",
+) -> dict[str, Any]:
+    return _decode_response(
+        await handle_submit_job(
+            {
+                "job_name": job_name,
+                "script": script,
+                "partition": partition,
+                "gpus": gpus,
+                "time_limit": time_limit,
+                "submitted_by": submitted_by,
+                "workflow_name": workflow_name,
+                "experiment_id": experiment_id,
+            }
         )
+    )
 
-    def list_experiments(self, *, limit: int | None = None) -> tuple[ExperimentState, ...]:
-        experiments = sorted(
-            self._store.get("experiments", []),
-            key=lambda record: _timestamp_sort_key(record, "updated_at", "created_at"),
-            reverse=True,
+
+async def cancel_job(*, job_id: str) -> dict[str, Any]:
+    return _decode_response(await handle_cancel_job({"job_id": job_id}))
+
+
+async def list_experiments(
+    *,
+    status: str = "",
+    dataset: str = "",
+    model_type: str = "",
+    tag: str = "",
+    search_text: str = "",
+    limit: int = 20,
+) -> dict[str, Any]:
+    return _decode_response(
+        await handle_query_experiments(
+            {
+                "status": status,
+                "dataset": dataset,
+                "model_type": model_type,
+                "tag": tag,
+                "search_text": search_text,
+                "limit": limit,
+            }
         )
-        if limit is not None:
-            experiments = experiments[:limit]
+    )
 
-        return tuple(self._build_experiment_state(experiment) for experiment in experiments)
 
-    def list_insights(self, *, limit: int | None = None) -> tuple[InsightState, ...]:
-        insights = sorted(
-            self._store.get("insights", []),
-            key=lambda record: _timestamp_sort_key(record, "created_at"),
-            reverse=True,
+async def get_experiment(*, experiment_id: str) -> dict[str, Any]:
+    return _decode_response(await handle_get_experiment({"experiment_id": experiment_id}))
+
+
+async def create_experiment(
+    *,
+    name: str,
+    hypothesis: str = "",
+    description: str = "",
+    config: str = "",
+    status: str = "planned",
+    dataset: str = "",
+    model_type: str = "",
+    tags: list[str] | None = None,
+    created_by: str = "",
+    actor_type: str = "",
+    workflow_name: str = "",
+    results: str = "",
+) -> dict[str, Any]:
+    return _decode_response(
+        await handle_store_experiment(
+            {
+                "name": name,
+                "hypothesis": hypothesis,
+                "description": description,
+                "config": config,
+                "status": status,
+                "dataset": dataset,
+                "model_type": model_type,
+                "tags": json.dumps(tags or []),
+                "created_by": created_by,
+                "actor_type": actor_type,
+                "workflow_name": workflow_name,
+                "results": results,
+            }
         )
-        if limit is not None:
-            insights = insights[:limit]
+    )
 
-        return tuple(
-            InsightState(
-                insight_id=str(insight.get("id", "")),
-                title=str(insight.get("title", "")),
-                category=str(insight.get("category", "observation")),
-                confidence=insight.get("confidence"),
-                content=str(insight.get("content", "")),
-                created_at=str(insight.get("created_at", "")),
-            )
-            for insight in insights
+
+async def update_experiment(
+    *,
+    experiment_id: str,
+    status: str = "",
+    results: str = "",
+    wandb_run_id: str = "",
+    wandb_run_url: str = "",
+    slurm_job_id: str = "",
+    actor_type: str = "",
+    workflow_name: str = "",
+) -> dict[str, Any]:
+    return _decode_response(
+        await handle_update_experiment(
+            {
+                "experiment_id": experiment_id,
+                "status": status,
+                "results": results,
+                "wandb_run_id": wandb_run_id,
+                "wandb_run_url": wandb_run_url,
+                "slurm_job_id": slurm_job_id,
+                "actor_type": actor_type,
+                "workflow_name": workflow_name,
+            }
         )
+    )
 
-    def list_papers(self, *, limit: int | None = None) -> tuple[PaperState, ...]:
-        papers = sorted(
-            self._store.get("papers", []),
-            key=lambda record: _timestamp_sort_key(record, "added_at"),
-            reverse=True,
+
+async def list_context() -> dict[str, Any]:
+    return _decode_response(await handle_get_research_context({}))
+
+
+async def get_context(*, key: str) -> dict[str, Any]:
+    return _decode_response(await handle_get_research_context({"key": key}))
+
+
+async def set_context(
+    *,
+    key: str,
+    value: str,
+    context_type: str = "note",
+    actor_type: str = "",
+    workflow_name: str = "",
+    linked_experiment_id: str = "",
+    linked_job_id: str = "",
+) -> dict[str, Any]:
+    return _decode_response(
+        await handle_set_research_context(
+            {
+                "key": key,
+                "value": value,
+                "context_type": context_type,
+                "actor_type": actor_type,
+                "workflow_name": workflow_name,
+                "linked_experiment_id": linked_experiment_id,
+                "linked_job_id": linked_job_id,
+            }
         )
-        if limit is not None:
-            papers = papers[:limit]
+    )
 
-        return tuple(
-            PaperState(
-                paper_id=str(paper.get("id", "")),
-                title=str(paper.get("title", "")),
-                authors=tuple(str(author) for author in paper.get("authors", [])),
-                year=paper.get("year"),
-                relevance_notes=str(paper.get("relevance_notes", "")),
-                tags=tuple(str(tag) for tag in paper.get("tags", [])),
-                added_at=str(paper.get("added_at", "")),
-            )
-            for paper in papers
+
+async def list_insights(*, category: str = "", tag: str = "", search_text: str = "", limit: int = 20) -> dict[str, Any]:
+    return _decode_response(
+        await handle_query_insights(
+            {
+                "category": category,
+                "tag": tag,
+                "search_text": search_text,
+                "limit": limit,
+            }
         )
+    )
 
-    def list_context_entries(self, *, limit: int | None = None) -> tuple[ContextState, ...]:
-        entries = sorted(
-            self._store.get("context", []),
-            key=lambda record: _timestamp_sort_key(record, "updated_at"),
-            reverse=True,
+
+async def add_insight(
+    *,
+    title: str,
+    content: str,
+    category: str = "observation",
+    experiment_id: str = "",
+    confidence: float | None = None,
+    tags: list[str] | None = None,
+    created_by: str = "",
+    actor_type: str = "",
+    workflow_name: str = "",
+    linked_job_id: str = "",
+) -> dict[str, Any]:
+    return _decode_response(
+        await handle_store_insight(
+            {
+                "title": title,
+                "content": content,
+                "category": category,
+                "experiment_id": experiment_id,
+                "confidence": confidence,
+                "tags": json.dumps(tags or []),
+                "created_by": created_by,
+                "actor_type": actor_type,
+                "workflow_name": workflow_name,
+                "linked_job_id": linked_job_id,
+            }
         )
-        if limit is not None:
-            entries = entries[:limit]
+    )
 
-        return tuple(
-            ContextState(
-                context_id=str(entry.get("id", "")),
-                key=str(entry.get("key", "")),
-                context_type=str(entry.get("context_type", "note")),
-                value=str(entry.get("value", "")),
-                updated_at=str(entry.get("updated_at", "")),
-            )
-            for entry in entries
+
+async def list_papers(*, limit: int = 20) -> dict[str, Any]:
+    papers = list(_store["papers"])[-limit:]
+    return {"total": len(papers), "papers": papers}
+
+
+async def search_papers(*, query: str, max_results: int = 10, sources: str = "both") -> dict[str, Any]:
+    return _decode_response(
+        await handle_search_papers(
+            {"query": query, "max_results": max_results, "sources": sources}
         )
+    )
 
-    def snapshot(
-        self,
-        *,
-        job_limit: int | None = None,
-        experiment_limit: int | None = None,
-        insight_limit: int | None = None,
-        paper_limit: int | None = None,
-        context_limit: int | None = None,
-    ) -> ResearchOpsState:
-        return ResearchOpsState(
-            jobs=self.list_jobs(limit=job_limit),
-            experiments=self.list_experiments(limit=experiment_limit),
-            insights=self.list_insights(limit=insight_limit),
-            papers=self.list_papers(limit=paper_limit),
-            context_entries=self.list_context_entries(limit=context_limit),
+
+async def save_paper(
+    *,
+    title: str,
+    authors: list[str] | None = None,
+    abstract: str = "",
+    arxiv_id: str = "",
+    year: int | None = None,
+    url: str = "",
+    relevance_notes: str = "",
+    tags: list[str] | None = None,
+    actor_type: str = "",
+    workflow_name: str = "",
+) -> dict[str, Any]:
+    return _decode_response(
+        await handle_store_paper(
+            {
+                "title": title,
+                "authors": json.dumps(authors or []),
+                "abstract": abstract,
+                "arxiv_id": arxiv_id,
+                "year": year,
+                "url": url,
+                "relevance_notes": relevance_notes,
+                "tags": json.dumps(tags or []),
+                "actor_type": actor_type,
+                "workflow_name": workflow_name,
+            }
         )
-
-    def _build_experiment_state(self, experiment: Mapping[str, Any]) -> ExperimentState:
-        linked_job_id = str(experiment.get("slurm_job_id") or "").strip() or None
-        linked_job = self._jobs.get(linked_job_id) if linked_job_id else None
-
-        raw_results = experiment.get("results")
-        if isinstance(raw_results, Mapping):
-            results = dict(raw_results)
-        elif raw_results:
-            results = {"raw": raw_results}
-        else:
-            results = {}
-
-        return ExperimentState(
-            experiment_id=str(experiment.get("id", "")),
-            name=str(experiment.get("name", "")),
-            status=str(experiment.get("status", "unknown")),
-            hypothesis=str(experiment.get("hypothesis", "")),
-            description=str(experiment.get("description", "")),
-            dataset=str(experiment.get("dataset", "")),
-            model_type=str(experiment.get("model_type", "")),
-            tags=tuple(str(tag) for tag in experiment.get("tags", [])),
-            results=results,
-            linked_job_id=linked_job_id,
-            linked_job_status=linked_job.status if linked_job else None,
-            wandb_run_id=str(experiment.get("wandb_run_id", "")),
-            created_at=str(experiment.get("created_at", "")),
-            updated_at=str(experiment.get("updated_at", experiment.get("created_at", ""))),
-        )
+    )
