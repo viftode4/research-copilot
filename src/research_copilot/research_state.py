@@ -6,10 +6,13 @@ import json
 import os
 import re
 import shutil
+import time
+from contextlib import suppress
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 SCHEMA_VERSION = "1.0"
 GLOBAL_REGISTRY_VERSION = "1.0"
@@ -277,16 +280,35 @@ def _artifact_path(family: str, record: dict[str, Any]) -> Path:
 
 def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    temp_path = path.with_suffix(f"{path.suffix}.tmp")
-    temp_path.write_text(json.dumps(payload, indent=2, sort_keys=True, default=str), encoding="utf-8")
-    temp_path.replace(path)
+    temp_path = path.parent / f"{path.name}.{os.getpid()}.{uuid4().hex}.tmp"
+    try:
+        temp_path.write_text(json.dumps(payload, indent=2, sort_keys=True, default=str), encoding="utf-8")
+        _replace_with_retry(temp_path, path)
+    finally:
+        with suppress(FileNotFoundError):
+            temp_path.unlink()
 
 
 def _atomic_write_text(path: Path, content: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    temp_path = path.with_suffix(f"{path.suffix}.tmp")
-    temp_path.write_text(content, encoding="utf-8")
-    temp_path.replace(path)
+    temp_path = path.parent / f"{path.name}.{os.getpid()}.{uuid4().hex}.tmp"
+    try:
+        temp_path.write_text(content, encoding="utf-8")
+        _replace_with_retry(temp_path, path)
+    finally:
+        with suppress(FileNotFoundError):
+            temp_path.unlink()
+
+
+def _replace_with_retry(source: Path, destination: Path, *, attempts: int = 8) -> None:
+    for attempt in range(attempts):
+        try:
+            source.replace(destination)
+            return
+        except PermissionError:
+            if attempt == attempts - 1:
+                raise
+            time.sleep(0.01 * (attempt + 1))
 
 
 def _artifact_dir(name: str) -> Path:

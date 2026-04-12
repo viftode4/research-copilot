@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import json
+import threading
+from pathlib import Path
 
 import pytest
 
+import research_copilot.research_state as research_state_module
 from research_copilot.research_state import (
     FileBackedCollection,
     build_provenance,
@@ -236,6 +239,54 @@ def test_recent_workspace_registry_tracks_workspace_dirs_even_for_new_root(
     assert root == workspace / ".research-copilot"
     assert registry["last_workspace"] == str(workspace)
     assert registry["workspaces"][0] == str(workspace)
+
+
+def test_remember_workspace_uses_collision_safe_temp_files_for_concurrent_writes(
+    monkeypatch, tmp_path
+) -> None:
+    global_home = tmp_path / "global-home"
+    workspace = tmp_path / "workspace-a"
+    workspace.mkdir()
+    monkeypatch.setenv("RC_GLOBAL_HOME", str(global_home))
+    monkeypatch.setenv("RC_WORKING_DIR", str(workspace))
+
+    ensure_research_root()
+    registry_path = get_recent_workspaces_registry_path()
+    original_replace = research_state_module.Path.replace
+    release_replacements = threading.Event()
+    replacement_calls = 0
+    replacement_lock = threading.Lock()
+    errors: list[Exception] = []
+
+    def synchronized_replace(self, target):
+        nonlocal replacement_calls
+        if Path(target) == registry_path:
+            with replacement_lock:
+                replacement_calls += 1
+                if replacement_calls == 2:
+                    release_replacements.set()
+            assert release_replacements.wait(timeout=2)
+        return original_replace(self, target)
+
+    monkeypatch.setattr(research_state_module.Path, "replace", synchronized_replace)
+
+    def remember() -> None:
+        try:
+            remember_workspace(workspace)
+        except Exception as exc:  # pragma: no cover - failure path asserted below
+            errors.append(exc)
+
+    first = threading.Thread(target=remember)
+    second = threading.Thread(target=remember)
+    first.start()
+    second.start()
+    first.join()
+    second.join()
+
+    assert errors == []
+    assert replacement_calls >= 2
+    assert load_recent_workspaces()["last_workspace"] == str(workspace)
+    assert list(registry_path.parent.glob("recent-workspaces.json*.tmp")) == []
 
 
 def test_legacy_omx_root_can_be_read_without_rewriting_during_transition(
