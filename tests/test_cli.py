@@ -320,12 +320,12 @@ def test_status_and_top_level_help_reflect_terminal_first_surface(monkeypatch, t
     assert "Onboarding:" in status_result.output
     assert "research-copilot init" in status_result.output
     assert help_result.exit_code == 0
-    assert "serve" not in help_result.output
     assert "workflow" in help_result.output
     assert "jobs" in help_result.output
     assert "experiments" in help_result.output
     assert "context" in help_result.output
     assert "insights" in help_result.output
+    assert "mcp" in help_result.output
     assert "papers" in help_result.output
     assert "snapshot" in help_result.output
     assert "init" in help_result.output
