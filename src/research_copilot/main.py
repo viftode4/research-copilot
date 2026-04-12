@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import importlib
 import json
 import os
 import warnings
@@ -17,6 +18,11 @@ except Exception:  # pragma: no cover - optional compatibility guard
     RequestsDependencyWarning = Warning
 
 from research_copilot.config import load_config
+from research_copilot.integrations.mcp.install import (
+    render_agents_snippet,
+    render_claude_config,
+    render_codex_config,
+)
 from research_copilot.research_state import (
     get_last_workspace,
     get_research_root,
@@ -83,6 +89,12 @@ WORKFLOW_EPILOG = """
 Start with: research-copilot init
 Then: research-copilot workflow triage --json
 Solo proof: docs/seeded-solo-cli-scenario.md
+"""
+
+MCP_EPILOG = """
+Print Codex setup: research-copilot mcp print-codex-config
+Print Claude config: research-copilot mcp print-claude-config
+Print AGENTS snippet: research-copilot mcp print-agents-snippet
 """
 
 JSON_SCHEMA_VERSION = "1.0"
@@ -327,6 +339,22 @@ def _emit_result(payload: Any, as_json: bool, summary: str | None = None) -> Non
         click.echo(json.dumps(payload, indent=2, sort_keys=True, default=str))
 
 
+def _load_mcp_server_entrypoint() -> Any:
+    try:
+        module = importlib.import_module("research_copilot.integrations.mcp.server")
+    except ModuleNotFoundError as exc:
+        raise click.ClickException(
+            "MCP server transport is not available in this build yet."
+        ) from exc
+
+    serve = getattr(module, "serve_stdio_server", None)
+    if serve is None:
+        raise click.ClickException(
+            "Expected `serve_stdio_server` in research_copilot.integrations.mcp.server."
+        )
+    return serve
+
+
 @cli.command()
 @click.option("--limit", default=5, show_default=True, type=click.IntRange(1, 50))
 @click.option("--json", "as_json", is_flag=True, help="Emit machine-readable JSON.")
@@ -338,6 +366,38 @@ def snapshot(limit: int, as_json: bool):
         f"{payload['experiments']['total']} experiment(s)."
     )
     _emit_result(payload, as_json, summary)
+
+
+@cli.group(epilog=MCP_EPILOG.strip())
+def mcp():
+    """Run the MCP server and render agent install/config snippets."""
+
+
+@mcp.command("serve")
+def mcp_serve():
+    """Run the stdio MCP server for coding-agent workflows."""
+    entrypoint = _load_mcp_server_entrypoint()
+    result = entrypoint()
+    if asyncio.iscoroutine(result):
+        _run_command(result)
+
+
+@mcp.command("print-codex-config")
+def mcp_print_codex_config():
+    """Render a usable Codex MCP setup snippet."""
+    click.echo(render_codex_config())
+
+
+@mcp.command("print-claude-config")
+def mcp_print_claude_config():
+    """Render a project-scoped Claude Code `.mcp.json` example."""
+    click.echo(render_claude_config())
+
+
+@mcp.command("print-agents-snippet")
+def mcp_print_agents_snippet():
+    """Render an AGENTS.md hint that nudges Research Copilot MCP usage."""
+    click.echo(render_agents_snippet())
 
 
 @cli.group()
