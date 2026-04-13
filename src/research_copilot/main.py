@@ -63,6 +63,7 @@ from research_copilot.services.research_ops import (
     update_experiment as update_experiment_service,
 )
 from research_copilot.services.codex_runtime import (
+    apply_codex_nudges,
     attach_codex_session,
     codex_runtime_status,
     drain_codex_nudges,
@@ -865,6 +866,17 @@ def runtime_codex_drain_nudges(session_id: str, limit: int | None, as_json: bool
     _guard_machine_mutation(as_json)
     payload = drain_codex_nudges(session_id=session_id, limit=limit)
     _emit_result(payload, as_json, f"Drained {len(payload['drained'])} nudge(s) for session {session_id}.")
+
+
+@runtime.command("codex-apply-nudges")
+@click.option("--session-id", required=True, help="Stable Codex session identifier.")
+@click.option("--limit", type=click.IntRange(1, None), default=None)
+@click.option("--json", "as_json", is_flag=True, help="Emit machine-readable JSON.")
+def runtime_codex_apply_nudges(session_id: str, limit: int | None, as_json: bool):
+    """Apply queued steering nudges into the registered tmux pane, then drain them."""
+    _guard_machine_mutation(as_json)
+    payload = apply_codex_nudges(session_id=session_id, limit=limit)
+    _emit_result(payload, as_json, f"Applied {len(payload['applied'])} nudge(s) to session {session_id}.")
 
 
 @cli.group()

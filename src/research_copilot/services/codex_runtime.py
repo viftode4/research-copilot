@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -133,6 +134,39 @@ def _load_pending_nudges(session_id: str) -> list[dict[str, Any]]:
 
 def _nudge_count(session_id: str) -> int:
     return len(_nudge_queue_paths(session_id))
+
+
+def _run_tmux_command(*args: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["tmux", *args],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+
+def _tmux_pane_exists(pane_id: str) -> bool:
+    if not pane_id:
+        return False
+    try:
+        _run_tmux_command("display-message", "-p", "-t", pane_id, "#{pane_id}")
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return False
+    return True
+
+
+def _nudge_message_line(nudge: dict[str, Any]) -> str:
+    kind = _string(nudge.get("kind")) or "nudge"
+    message = _string(nudge.get("message"))
+    prefix = "Research Copilot steering"
+    templates = {
+        "nudge": f"{prefix}: {message or 'Adjust the next bounded turn according to the latest operator request.'}",
+        "request_summary": f"{prefix}: provide a concise summary on your next bounded turn. {message}".strip(),
+        "pause": f"{prefix}: pause after the current bounded turn and wait for further instruction. {message}".strip(),
+        "resume": f"{prefix}: resume the previous task now. {message}".strip(),
+        "stop_after_turn": f"{prefix}: stop after the current bounded turn and summarize what changed. {message}".strip(),
+    }
+    return templates.get(kind, f"{prefix}: {message}".strip())
 
 
 def _payload_hash(payload: dict[str, Any]) -> str:
@@ -634,4 +668,59 @@ def drain_codex_nudges(*, session_id: str, limit: int | None = None) -> dict[str
 
     response = _status_response(current, include_nudges=True)
     response["drained"] = drained
+    return response
+
+
+def apply_codex_nudges(
+    *,
+    session_id: str,
+    limit: int | None = None,
+) -> dict[str, Any]:
+    """Apply queued nudges into the registered tmux pane, then drain them."""
+
+    resolved_session_id = _string(session_id)
+    if not resolved_session_id:
+        raise ValueError("session_id is required to apply Codex nudges.")
+
+    current = _load_session_payload(resolved_session_id)
+    if not current:
+        raise ValueError(f"No Codex runtime session '{resolved_session_id}' was found.")
+
+    transport = _dict(current.get("transport"))
+    transport_type = _string(transport.get("type")) or _string(current.get("transport"))
+    pane_id = _string(current.get("pane_id")) or _string(transport.get("pane_id"))
+    if transport_type != "tmux-pane":
+        raise ValueError("Queued nudges can only be applied to tmux-pane Codex sessions.")
+    if not _tmux_pane_exists(pane_id):
+        raise ValueError(f"tmux pane '{pane_id}' is not available.")
+
+    pending = _load_pending_nudges(resolved_session_id)
+    if limit is not None:
+        pending = pending[:limit]
+    if not pending:
+        response = _status_response(current, include_nudges=True)
+        response["applied"] = []
+        return response
+
+    for nudge in pending:
+        message = _nudge_message_line(nudge)
+        _run_tmux_command("send-keys", "-t", pane_id, message, "Enter")
+
+    drained = drain_codex_nudges(session_id=resolved_session_id, limit=len(pending))
+    current = _load_session_payload(resolved_session_id)
+    current["last_steering_applied_at"] = utc_now_iso()
+    current["updated_at"] = _string(current.get("last_steering_applied_at"))
+    save_codex_active_session(current)
+    append_codex_runtime_event(
+        resolved_session_id,
+        {
+            "event_type": "codex.nudges.applied_to_pane",
+            "pane_id": pane_id,
+            "applied_count": len(pending),
+            "nudge_ids": [_string(item.get("nudge_id")) for item in pending if _string(item.get("nudge_id"))],
+        },
+    )
+    response = _status_response(current, include_nudges=True)
+    response["applied"] = pending
+    response["drained"] = drained.get("drained", [])
     return response

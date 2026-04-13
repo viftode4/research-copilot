@@ -142,6 +142,7 @@ def test_codex_runtime_tools_are_listed() -> None:
         "rc_codex_report_turn",
         "rc_codex_steer",
         "rc_codex_drain_nudges",
+        "rc_codex_apply_nudges",
     }
     tools = {tool["name"]: tool for tool in list_mcp_tools()}
 
@@ -331,3 +332,40 @@ async def test_codex_runtime_tools_share_service_contract(monkeypatch: pytest.Mo
     assert status_payload["pending_nudges"] == []
     assert load_codex_active_session()["last_experiment_id"] == "exp-1"
     assert load_codex_turn_summary("codex-1", 1) == "Reviewed the active experiment."
+
+
+@pytest.mark.asyncio
+async def test_codex_apply_nudges_tool_routes_to_tmux_consumer(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    monkeypatch.chdir(tmp_path)
+    initialize_workspace()
+
+    await call_tool(
+        "rc_codex_attach",
+        {
+            "session_id": "codex-1",
+            "pane_id": "%81",
+            "window_name": "brain",
+        },
+    )
+    await call_tool(
+        "rc_codex_steer",
+        {
+            "session_id": "codex-1",
+            "kind": "request_summary",
+            "message": "Need a tighter recap.",
+        },
+    )
+
+    monkeypatch.setattr("research_copilot.services.codex_runtime._tmux_pane_exists", lambda pane_id: pane_id == "%81")
+    sent: list[tuple[str, ...]] = []
+
+    def fake_run_tmux_command(*args: str):
+        sent.append(args)
+        return None
+
+    monkeypatch.setattr("research_copilot.services.codex_runtime._run_tmux_command", fake_run_tmux_command)
+
+    payload = await call_tool("rc_codex_apply_nudges", {"session_id": "codex-1"})
+
+    assert payload["pending_nudge_count"] == 0
+    assert any(args[:3] == ("send-keys", "-t", "%81") for args in sent)

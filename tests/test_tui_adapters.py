@@ -26,7 +26,12 @@ from research_copilot.services.workflow_snapshot import (
     build_workflow_snapshot,
     summarize_job,
 )
-from research_copilot.tui.adapters import fetch_full_entity_log, fetch_full_run_log, load_full_job_logs
+from research_copilot.tui.adapters import (
+    build_dashboard_snapshot,
+    fetch_full_entity_log,
+    fetch_full_run_log,
+    load_full_job_logs,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -94,6 +99,53 @@ class TestWorkflowSnapshot:
         assert snapshot["runtime"]["source"] == "codex"
         assert snapshot["runtime"]["session_id"] == "codex-1"
         assert snapshot["runtime"]["goal"] == "Monitor Codex runtime in the dashboard"
+
+    def test_dashboard_snapshot_marks_lagging_and_stale_freshness_explicitly(self, monkeypatch, tmp_path):
+        monkeypatch.chdir(tmp_path)
+        attach_codex_session(session_id="codex-1")
+        active_path = tmp_path / ".research-copilot" / "runtime" / "codex" / "active.json"
+        payload = json.loads(active_path.read_text(encoding="utf-8"))
+        payload["last_heartbeat_at"] = "2026-04-13T00:00:00+00:00"
+        payload["updated_at"] = "2026-04-13T00:00:00+00:00"
+        active_path.write_text(json.dumps(payload), encoding="utf-8")
+
+        class LaggingDateTime:
+            @staticmethod
+            def now(tz=None):
+                from datetime import datetime, timezone
+
+                return datetime(2026, 4, 13, 0, 1, 10, tzinfo=timezone.utc)
+
+            @staticmethod
+            def fromisoformat(value):
+                from datetime import datetime
+
+                return datetime.fromisoformat(value)
+
+        class StaleDateTime:
+            @staticmethod
+            def now(tz=None):
+                from datetime import datetime, timezone
+
+                return datetime(2026, 4, 13, 0, 3, 10, tzinfo=timezone.utc)
+
+            @staticmethod
+            def fromisoformat(value):
+                from datetime import datetime
+
+                return datetime.fromisoformat(value)
+
+        monkeypatch.setattr("research_copilot.tui.adapters.datetime", LaggingDateTime)
+        lagging_snapshot = build_dashboard_snapshot()
+        assert lagging_snapshot.runtime is not None
+        assert lagging_snapshot.runtime.freshness_state == "lagging"
+        assert "lagging" in lagging_snapshot.runtime.freshness_label
+
+        monkeypatch.setattr("research_copilot.tui.adapters.datetime", StaleDateTime)
+        stale_snapshot = build_dashboard_snapshot()
+        assert stale_snapshot.runtime is not None
+        assert stale_snapshot.runtime.freshness_state == "stale"
+        assert "stale" in stale_snapshot.runtime.freshness_label
 
     @pytest.mark.asyncio
     async def test_snapshot_links_jobs_experiments_and_knowledge(self):

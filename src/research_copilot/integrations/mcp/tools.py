@@ -34,6 +34,7 @@ from research_copilot.services.research_ops import (
     set_context as set_context_service,
 )
 from research_copilot.services.codex_runtime import (
+    apply_codex_nudges,
     attach_codex_session,
     codex_runtime_status,
     drain_codex_nudges,
@@ -530,6 +531,13 @@ async def rc_codex_drain_nudges(arguments: dict[str, Any]) -> dict[str, Any]:
     )
 
 
+async def rc_codex_apply_nudges(arguments: dict[str, Any]) -> dict[str, Any]:
+    return apply_codex_nudges(
+        session_id=str(arguments["session_id"]),
+        limit=arguments.get("limit"),
+    )
+
+
 TOOL_DEFINITIONS: tuple[McpToolDefinition, ...] = (
     McpToolDefinition(
         name="rc_status",
@@ -902,6 +910,21 @@ TOOL_DEFINITIONS: tuple[McpToolDefinition, ...] = (
             required=["session_id"],
         ),
         handler=rc_codex_drain_nudges,
+    ),
+    McpToolDefinition(
+        name="rc_codex_apply_nudges",
+        description=(
+            "Apply queued steering nudges into the registered tmux pane and then drain them. "
+            "Side effects: sends steering text to the live pane and removes delivered nudges from the queue."
+        ),
+        input_schema=object_schema(
+            {
+                "session_id": string_field("Stable Codex session identifier."),
+                "limit": integer_field("Optional maximum nudges to apply.", minimum=1),
+            },
+            required=["session_id"],
+        ),
+        handler=rc_codex_apply_nudges,
     ),
 )
 

@@ -105,4 +105,5 @@ APPROVED_V1_TOOL_NAMES = (
     "rc_codex_report_turn",
     "rc_codex_steer",
     "rc_codex_drain_nudges",
+    "rc_codex_apply_nudges",
 )

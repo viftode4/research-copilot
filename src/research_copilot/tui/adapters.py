@@ -7,6 +7,10 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
+from research_copilot.services.codex_runtime import (
+    CODEX_LAGGING_THRESHOLD_SECONDS,
+    CODEX_STALE_THRESHOLD_SECONDS,
+)
 from research_copilot.services.research_ops import ACTIVE_JOB_STATUSES, ResearchOpsService
 from research_copilot.services.workflow_snapshot import build_canonical_snapshot
 
@@ -316,7 +320,14 @@ def _build_runtime_record(snapshot: dict[str, Any]) -> RuntimeRecord | None:
         )
     elif heartbeat is not None:
         age_seconds = max(0, int((now - heartbeat).total_seconds()))
-        freshness_state = "fresh" if age_seconds <= 15 else "lagging" if age_seconds <= 60 else "stale"
+        if age_seconds >= CODEX_STALE_THRESHOLD_SECONDS:
+            freshness_state = "stale"
+            freshness_label = f"stale • heartbeat {_relative_age_label(heartbeat_at, now=now)}"
+        elif age_seconds >= CODEX_LAGGING_THRESHOLD_SECONDS:
+            freshness_state = "lagging"
+            freshness_label = f"lagging • heartbeat {_relative_age_label(heartbeat_at, now=now)}"
+        else:
+            freshness_state = "fresh"
     elif status in {"completed", "failed", "stopped"}:
         freshness_state = "terminal"
 

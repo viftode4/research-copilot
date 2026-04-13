@@ -12,8 +12,10 @@ from research_copilot.research_state import (
     load_codex_runtime_transport,
     load_codex_turn_summary,
     resolve_active_session,
+    save_codex_active_session,
 )
 from research_copilot.services.codex_runtime import (
+    apply_codex_nudges,
     attach_codex_session,
     codex_runtime_status,
     drain_codex_nudges,
@@ -166,3 +168,70 @@ def test_nudges_persist_and_drain_from_queue(monkeypatch, tmp_path) -> None:
     assert status["pending_nudge_count"] == 0
     assert status["pending_nudges"] == []
     assert json.loads(json.dumps(drained["drained"]))[0]["session_id"] == "codex-1"
+
+
+def test_apply_codex_nudges_sends_to_tmux_pane_and_drains(monkeypatch, tmp_path) -> None:
+    sent: list[tuple[str, ...]] = []
+
+    def fake_run_tmux_command(*args: str):
+        sent.append(args)
+        return None
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("research_copilot.services.codex_runtime._run_tmux_command", fake_run_tmux_command)
+    monkeypatch.setattr("research_copilot.services.codex_runtime._tmux_pane_exists", lambda pane_id: pane_id == "%12")
+    attach_codex_session(session_id="codex-1", pane_id="%12", window_name="brain", session_name="codex-1")
+    enqueue_codex_nudge(session_id="codex-1", kind="request_summary", message="Need a tighter recap.")
+    enqueue_codex_nudge(session_id="codex-1", kind="stop_after_turn", message="Stop after this turn.")
+
+    applied = apply_codex_nudges(session_id="codex-1")
+    status = codex_runtime_status(session_id="codex-1", include_nudges=True)
+
+    assert len(applied["applied"]) == 2
+    assert status["pending_nudge_count"] == 0
+    assert any(args[:3] == ("send-keys", "-t", "%12") for args in sent)
+    assert any("Need a tighter recap." in " ".join(args) for args in sent)
+    assert any("Stop after this turn." in " ".join(args) for args in sent)
+
+
+def test_codex_runtime_status_reports_lagging_and_stale_from_heartbeat_age(monkeypatch, tmp_path) -> None:
+    monkeypatch.chdir(tmp_path)
+    attach_codex_session(session_id="codex-1")
+
+    lagging_payload = load_codex_active_session()
+    lagging_payload["last_heartbeat_at"] = "2026-04-13T00:00:00+00:00"
+    lagging_payload["updated_at"] = "2026-04-13T00:00:00+00:00"
+    save_codex_active_session(lagging_payload)
+    monkeypatch.setattr("research_copilot.services.codex_runtime.datetime", __import__("datetime").datetime)
+    monkeypatch.setattr(
+        "research_copilot.services.codex_runtime.datetime",
+        type(
+            "FixedDateTime",
+            (),
+            {
+                "now": staticmethod(lambda tz=None: __import__("datetime").datetime(2026, 4, 13, 0, 1, 10, tzinfo=tz)),
+                "fromisoformat": staticmethod(__import__("datetime").datetime.fromisoformat),
+            },
+        ),
+    )
+    lagging = codex_runtime_status(session_id="codex-1")
+
+    stale_payload = load_codex_active_session()
+    stale_payload["last_heartbeat_at"] = "2026-04-13T00:00:00+00:00"
+    stale_payload["updated_at"] = "2026-04-13T00:00:00+00:00"
+    save_codex_active_session(stale_payload)
+    monkeypatch.setattr(
+        "research_copilot.services.codex_runtime.datetime",
+        type(
+            "FixedDateTime",
+            (),
+            {
+                "now": staticmethod(lambda tz=None: __import__("datetime").datetime(2026, 4, 13, 0, 3, 10, tzinfo=tz)),
+                "fromisoformat": staticmethod(__import__("datetime").datetime.fromisoformat),
+            },
+        ),
+    )
+    stale = codex_runtime_status(session_id="codex-1")
+
+    assert lagging["freshness_state"] == "lagging"
+    assert stale["freshness_state"] == "stale"

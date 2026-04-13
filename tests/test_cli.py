@@ -519,6 +519,7 @@ def test_runtime_help_lists_codex_runtime_commands():
     assert "codex-report" in result.output
     assert "codex-nudge" in result.output
     assert "codex-drain-nudges" in result.output
+    assert "codex-apply-nudges" in result.output
 
 
 def test_runtime_codex_commands_attach_report_and_drain(monkeypatch, tmp_path):
@@ -603,6 +604,64 @@ def test_runtime_codex_commands_attach_report_and_drain(monkeypatch, tmp_path):
     assert json.loads(status_result.output)["data"]["pending_nudge_count"] == 0
     assert load_codex_active_session()["last_experiment_id"] == "exp-1"
     assert load_codex_turn_summary("codex-1", 1) == "Reviewed the latest results."
+
+
+def test_runtime_codex_apply_nudges_command_routes_to_live_pane(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+
+    runner.invoke(
+        cli,
+        [
+            "runtime",
+            "codex-attach",
+            "--session-id",
+            "codex-1",
+            "--pane-id",
+            "%71",
+            "--window-name",
+            "brain",
+            "--json",
+        ],
+    )
+    runner.invoke(
+        cli,
+        [
+            "runtime",
+            "codex-nudge",
+            "--session-id",
+            "codex-1",
+            "--kind",
+            "request_summary",
+            "--message",
+            "Need a tighter recap.",
+            "--json",
+        ],
+    )
+
+    monkeypatch.setattr("research_copilot.services.codex_runtime._tmux_pane_exists", lambda pane_id: pane_id == "%71")
+    sent: list[tuple[str, ...]] = []
+
+    def fake_run_tmux_command(*args: str):
+        sent.append(args)
+        return None
+
+    monkeypatch.setattr("research_copilot.services.codex_runtime._run_tmux_command", fake_run_tmux_command)
+
+    apply_result = runner.invoke(
+        cli,
+        [
+            "runtime",
+            "codex-apply-nudges",
+            "--session-id",
+            "codex-1",
+            "--json",
+        ],
+    )
+
+    assert apply_result.exit_code == 0, apply_result.output
+    assert json.loads(apply_result.output)["data"]["pending_nudge_count"] == 0
+    assert any(args[:3] == ("send-keys", "-t", "%71") for args in sent)
 
 
 
