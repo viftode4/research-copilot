@@ -379,7 +379,8 @@ def test_status_surfaces_saved_onboarding_contract(monkeypatch, tmp_path):
     assert "State:            Configured" in status_result.output
     assert "Probe random-data baseline behavior" in status_result.output
     assert "goal-chaser" in status_result.output
-    assert "research-copilot workflow triage" in status_result.output
+    assert "Recommended next action: research-copilot workflow triage" in status_result.output
+    assert "read-only TUI" in status_result.output
 
 
 
@@ -389,6 +390,7 @@ def test_workflow_help_lists_named_commands():
     result = runner.invoke(cli, ["workflow", "--help"])
 
     assert result.exit_code == 0
+    assert "Primary action surface for the solo research loop." in result.output
     assert "triage" in result.output
     assert "launch-experiment" in result.output
     assert "monitor-run" in result.output
@@ -415,6 +417,26 @@ def test_workflow_help_lists_autonomous_lifecycle_commands_when_runtime_lane_is_
     assert "autonomous-status" in result.output
     assert "autonomous-stop" in result.output
     assert "autonomous-resume" in result.output
+
+
+def test_workflow_triage_human_output_uses_recommended_next_action(monkeypatch):
+    async def fake_triage_workflow(*, max_items: int = 5):
+        return {
+            "workflow": "triage",
+            "snapshot": {"jobs": {"active": 0}, "experiments": {"total": 1}, "knowledge": {}},
+            "onboarding": None,
+            "blockers": ["No active blockers detected."],
+            "suggested_next_action": "review-results",
+        }
+
+    monkeypatch.setattr("research_copilot.main.triage_workflow", fake_triage_workflow)
+    runner = CliRunner()
+
+    result = runner.invoke(cli, ["workflow", "triage"])
+
+    assert result.exit_code == 0
+    assert "Recommended next action: review-results" in result.output
+    assert "Blockers: No active blockers detected." in result.output
 
 
 def test_autonomous_status_json_stays_read_only_when_runtime_lane_is_available(monkeypatch, tmp_path):
@@ -514,6 +536,7 @@ def test_runtime_help_lists_codex_runtime_commands():
     result = runner.invoke(cli, ["runtime", "--help"])
 
     assert result.exit_code == 0
+    assert "Advanced runtime supervision for Codex-managed sessions." in result.output
     assert "codex-attach" in result.output
     assert "codex-status" in result.output
     assert "codex-report" in result.output
