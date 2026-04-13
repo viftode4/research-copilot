@@ -12,11 +12,26 @@ Research Copilot keeps a split interface:
 - `research-copilot init` bootstraps the current folder for local use.
 - `research-copilot migrate` moves legacy `.omx/research/` state into the standalone layout.
 - `research-copilot` opens the human TUI dashboard or bootstrap view.
-- `research-copilot status` is the human-readable readiness check for onboarding + next-step guidance.
+- `research-copilot status` is the human-readable readiness check plus the recommended next action.
 - `research-copilot ... --json` is the stable agent-facing surface and never opens the TUI.
 - Named workflows package common multi-step research-ops tasks into explicit commands.
 - `research-copilot workflow onboard` persists the current single-user operating contract before autonomous work begins.
+- `research-copilot workflow autonomous-*` is the canonical autonomy surface.
+- `research-copilot runtime codex-*` is advanced expert supervision for a live Codex session, not the default operator path.
 - Ultrawork profiles package repeatable parallel execution patterns with named lanes and expected outputs.
+
+## Control-plane hierarchy
+
+Use the surfaces in this order:
+
+1. **TUI (`research-copilot`)** — primary observation surface, always read-only
+2. **Workflow CLI (`research-copilot workflow ...`)** — primary action surface
+3. **Runtime Codex CLI (`research-copilot runtime codex-*`)** — advanced expert supervision only
+
+Two wording rules should stay stable across help, docs, and demos:
+
+- **Recommended next action** is the human-facing phrase for what to do next.
+- The JSON payload key remains `suggested_next_action` for backward compatibility.
 
 ## Install and workspace bootstrap
 
@@ -77,14 +92,28 @@ Unless a section says otherwise, the examples below assume the workspace has alr
 | --- | --- | --- | --- |
 | `onboard` | Capture the current solo-user operating contract | `research-copilot workflow onboard ... [--json]` | Persisted goal, autonomy bounds, and next-step hints |
 | `onboard-show` | Review the saved contract | `research-copilot workflow onboard-show [--json]` | Current goal/profile plus suggested next commands |
-| `triage` | Inspect current state quickly | `research-copilot workflow triage [--json]` | Current-state summary with blockers and next action |
-| `launch-experiment` | Register and launch a tracked job safely | `research-copilot workflow launch-experiment ... [--json]` | Experiment created, job submitted, tracking linked |
+| `triage` | Inspect current state quickly | `research-copilot workflow triage [--json]` | Current-state summary with blockers and the recommended next action |
+| `launch-experiment` | Register an experiment and submit a tracked job | `research-copilot workflow launch-experiment ... [--json]` | Experiment created, job submitted, tracking linked |
 | `monitor-run` | Follow a running job or experiment | `research-copilot workflow monitor-run <id> [--json]` | Fresh status, logs, and notable events |
 | `review-results` | Interpret completed work | `research-copilot workflow review-results <id> [--json]` | Result summary, insights, and next-step context |
 | `research-context` | Search and persist literature/context | `research-copilot workflow research-context <query> [--json]` | Reading list, saved papers, and context updates |
-| `run-experiment` | Execute a real local experiment command | `research-copilot workflow run-experiment ... [--json]` | Persisted run artifact linked to an experiment |
+| `run-experiment` | Execute a bounded local experiment command | `research-copilot workflow run-experiment ... [--json]` | Persisted run artifact linked to an experiment |
 | `overfitting-check` | Review metric gaps for a finished experiment | `research-copilot workflow overfitting-check <id> [--json]` | Diagnostics about train/validation/test divergence |
 | `next-step` | Propose the most likely follow-up action | `research-copilot workflow next-step <id> [--json]` | Suggested experiment or evaluation move |
+
+## Common command distinctions
+
+### `status` vs `triage`
+
+- `status` is the human-readable readiness screen.
+- `triage` is the machine-safe workflow summary and the place to fetch the recommended next action programmatically.
+
+### `launch-experiment` vs `run-experiment`
+
+- `launch-experiment` creates a tracked experiment and submits a job into the managed run path.
+- `run-experiment` executes a bounded local command and persists the resulting run artifact.
+- Prefer `run-experiment` for smoke tests, local baselines, and demos.
+- Prefer `launch-experiment` for tracked job submission and longer-running managed work.
 
 ## Named workflows
 
@@ -142,13 +171,13 @@ research-copilot workflow triage --json
 - initialized local workspace state under `.research-copilot/`
 - current-state summary
 - top blockers or anomalies
-- suggested next action
+- recommended next action
 
 **TUI follow-up:** after triage seeds the workspace, the human operator can open `research-copilot`, move through runs/experiments/research panes, and keep the CLI as the mutating control surface.
 
 ### `launch-experiment`
 
-**Purpose:** register and launch a new experiment safely.
+**Purpose:** register a new experiment and submit its tracked job safely.
 
 **When to run:** use when a new hypothesis/config should become a tracked experiment with linked execution metadata.
 
@@ -254,7 +283,7 @@ research-copilot workflow research-context <query> --json
 
 ### `run-experiment`
 
-**Purpose:** execute a real local command and persist the resulting artifact into the single-user workflow.
+**Purpose:** execute a bounded local command and persist the resulting artifact into the single-user workflow.
 
 **When to run:** use for local smoke experiments, quick baselines, or bounded command execution that should be tracked like any other experiment.
 
@@ -396,4 +425,5 @@ Recommended help-text themes:
 - point new users to onboarding before autonomous execution
 - advertise `--json` for agent-safe automation
 - point first-time users to `workflow onboard`
+- prefer the phrase `recommended next action` in human-facing help/status copy
 - keep TUI references human-facing and read-only where possible
