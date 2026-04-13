@@ -12,6 +12,7 @@ from rich.columns import Columns
 from rich.console import Console, Group, RenderableType
 from rich.layout import Layout
 from rich.panel import Panel
+from rich.segment import Segment, Segments
 from rich.table import Table
 from rich.text import Text
 
@@ -42,8 +43,8 @@ PANE_ORDER = {
     "experiments": ("experiments", "links"),
     "research": ("insights", "papers", "context"),
 }
-COMMAND_HINT = "1-4 views • [/] cycle • Tab panes • j/k move • / search • f filter • s sort • l logs • g links • Ctrl+P palette • ? help • r refresh • q back • Q quit"
-COMPACT_COMMAND_HINT = "1-4 • Tab • j/k • Enter • g • l • / • r • q/Q"
+COMMAND_HINT = "1-4 views • [/] cycle • Tab panes • j/k move • Ctrl+U/D scroll • / search • f filter • s sort • l logs • g links • Ctrl+P palette • ? help • r refresh • q back • Q quit"
+COMPACT_COMMAND_HINT = "1-4 • Tab • j/k • Ctrl+U/D • Enter • g • l • / • r • q/Q"
 NARROW_WIDTH = 120
 MEDIUM_WIDTH = 160
 SHORT_HEIGHT = 32
@@ -102,6 +103,9 @@ class ResearchCopilotTUI:
         self.logs_modal_title = ""
         self.logs_modal_stdout = ""
         self.logs_modal_stderr = ""
+        self.scroll_offsets: dict[str, int] = {}
+        self.scroll_max_offsets: dict[str, int] = {}
+        self.scroll_page_sizes: dict[str, int] = {}
         self.viewport_width: int | None = None
         self.viewport_height: int | None = None
         self.auto_refresh_enabled = True
@@ -132,14 +136,17 @@ class ResearchCopilotTUI:
         self.show_links_modal = False
         self.show_palette = False
         self.show_logs_modal = False
+        self._reset_scroll_state()
 
     def cycle_screen(self, step: int) -> None:
         self.screen_index = (self.screen_index + step) % len(SCREEN_ORDER)
         self.show_links_modal = False
+        self._reset_scroll_state()
 
     def cycle_pane(self, step: int) -> None:
         panes = PANE_ORDER[self.current_screen]
         self.pane_indexes[self.current_screen] = (self.pane_indexes[self.current_screen] + step) % len(panes)
+        self._reset_scroll_state()
 
     def move_selection(self, step: int) -> None:
         pane = self.current_pane
@@ -153,6 +160,7 @@ class ResearchCopilotTUI:
             self.selected_paper_index = (self.selected_paper_index + step) % len(self.snapshot.papers)
         elif pane == "context" and self.snapshot.context_entries:
             self.selected_context_index = (self.selected_context_index + step) % len(self.snapshot.context_entries)
+        self._reset_scroll_state()
 
     def handle_command(self, command: str) -> bool:
         return self.handle_key(command)
@@ -161,6 +169,10 @@ class ResearchCopilotTUI:
         raw = key or ""
         if raw == "\x10":
             raw = "ctrl+p"
+        elif raw == "\x04":
+            raw = "ctrl+d"
+        elif raw == "\x15":
+            raw = "ctrl+u"
         if raw == "Q":
             return False
         normalized = raw.strip().lower()
@@ -168,6 +180,12 @@ class ResearchCopilotTUI:
             return self._handle_search_input(raw, normalized)
         if normalized == "":
             return True
+        if normalized in {"ctrl+d", "pagedown"}:
+            if self._scroll_active_renderable(1):
+                return True
+        if normalized in {"ctrl+u", "pageup"}:
+            if self._scroll_active_renderable(-1):
+                return True
         if normalized == "q":
             if self.show_help or self.show_links_modal or self.show_palette or self.show_logs_modal:
                 self.show_help = False
@@ -175,6 +193,7 @@ class ResearchCopilotTUI:
                 self.show_palette = False
                 self.palette_index = 0
                 self.show_logs_modal = False
+                self._reset_scroll_state()
                 return True
             return False
         if normalized in {"?", "help"}:
@@ -182,12 +201,14 @@ class ResearchCopilotTUI:
             self.show_links_modal = False
             self.show_palette = False
             self.show_logs_modal = False
+            self._reset_scroll_state()
             return True
         if normalized == "g":
             self.show_links_modal = bool(self._selected_links())
             self.show_help = False
             self.show_palette = False
             self.show_logs_modal = False
+            self._reset_scroll_state()
             return True
         if normalized in {"ctrl+p"}:
             self.show_palette = not self.show_palette
@@ -195,6 +216,7 @@ class ResearchCopilotTUI:
             self.show_help = False
             self.show_links_modal = False
             self.show_logs_modal = False
+            self._reset_scroll_state()
             return True
         if normalized == "/":
             self.input_mode = "search"
@@ -729,13 +751,13 @@ class ResearchCopilotTUI:
         info.add_row("Submitted", format_timestamp(job.submitted_at))
         info.add_row("Started", format_timestamp(job.started_at or ""))
         info.add_row("Completed", format_timestamp(job.completed_at or ""))
-        return Group(
+        return self._scroll_panel_content(Group(
             info,
             Text("\nLog summary", style="bold"),
             Text(job.log_tail, style="white"),
             Text("\nStderr summary", style="bold"),
             Text(job.error_tail or "(no stderr)", style="dim"),
-        )
+        ), "run_detail")
 
     def _render_experiment_detail(self, experiment: ExperimentRecord | None) -> RenderableType:
         if experiment is None:
@@ -753,13 +775,13 @@ class ResearchCopilotTUI:
         info.add_row("Updated", format_timestamp(experiment.updated_at))
         info.add_row("W&B run", experiment.wandb_run_id or "—")
         info.add_row("Linked job", experiment.slurm_job_id or "—")
-        return Group(
+        return self._scroll_panel_content(Group(
             info,
             Text("\nHypothesis / notes", style="bold"),
             Text(experiment.hypothesis or experiment.description or "No experiment notes yet."),
             Text("\nResult snapshot", style="bold"),
             Text(experiment.results_summary),
-        )
+        ), "experiment_detail")
 
     def _render_insights_table(self, limit: int | None = None) -> RenderableType:
         insights = self._visible_insights()
@@ -843,7 +865,7 @@ class ResearchCopilotTUI:
             if self.current_pane == "experiments":
                 return self._render_compact_experiment_detail(self._selected_experiment())
             return self._render_compact_job_detail(self._selected_job())
-        return self._render_selected_summary()
+        return self._scroll_panel_content(self._render_selected_summary(), "overview_focus")
 
     def _render_runtime_card(self, *, compact: bool) -> RenderableType:
         runtime = self._runtime_record()
@@ -898,7 +920,7 @@ class ResearchCopilotTUI:
                 compact_lines.append(
                     Text(f"Stop: {self._truncate_inline(stop_note, limit=72)}", style="bold red")
                 )
-            return Group(*compact_lines)
+            return self._scroll_panel_content(Group(*compact_lines), "runtime_card")
 
         info = Table.grid(expand=True)
         info.add_column(style="bold cyan", width=14)
@@ -928,7 +950,7 @@ class ResearchCopilotTUI:
             details.extend([Text("\nGoal", style="bold"), Text(runtime.goal)])
         if stop_note:
             details.extend([Text("\nStop reason", style="bold red"), Text(stop_note, style="red")])
-        return Group(*details)
+        return self._scroll_panel_content(Group(*details), "runtime_card")
 
     def _render_selected_research_detail(self) -> RenderableType:
         if self.current_pane == "papers":
@@ -940,39 +962,39 @@ class ResearchCopilotTUI:
     def _render_insight_detail(self, insight: InsightRecord | None) -> RenderableType:
         if insight is None:
             return Text("No insight selected.", style="dim")
-        return Group(
+        return self._scroll_panel_content(Group(
             Text(insight.title, style="bold"),
             Text(f"Category: {insight.category} • Confidence: {insight.confidence}", style="dim"),
             Text(""),
             Text(insight.content),
             Text(""),
             self._render_links_summary(insight.entity_id),
-        )
+        ), "research_detail")
 
     def _render_paper_detail(self, paper: PaperRecord | None) -> RenderableType:
         if paper is None:
             return Text("No paper selected.", style="dim")
         authors = ", ".join(paper.authors) if paper.authors else "—"
-        return Group(
+        return self._scroll_panel_content(Group(
             Text(paper.title, style="bold"),
             Text(f"Authors: {authors} • Year: {paper.year}", style="dim"),
             Text(""),
             Text(paper.relevance_notes or "No relevance notes stored."),
             Text(""),
             self._render_links_summary(paper.entity_id),
-        )
+        ), "research_detail")
 
     def _render_context_detail(self, context: ContextRecord | None) -> RenderableType:
         if context is None:
             return Text("No context selected.", style="dim")
-        return Group(
+        return self._scroll_panel_content(Group(
             Text(context.key, style="bold"),
             Text(f"Type: {context.context_type}", style="dim"),
             Text(""),
             Text(context.value),
             Text(""),
             self._render_links_summary(context.entity_id),
-        )
+        ), "research_detail")
 
     def _render_help_modal(self) -> RenderableType:
         help_lines = Group(
@@ -994,7 +1016,7 @@ class ResearchCopilotTUI:
             Text("q close help or exit"),
             Text("Q quit"),
         )
-        return Panel(help_lines, title="Help", border_style="cyan")
+        return Panel(self._scroll_panel_content(help_lines, "help_modal"), title="Help", border_style="cyan")
 
     def _render_links_modal(self) -> RenderableType:
         links = self._selected_links()
@@ -1007,7 +1029,7 @@ class ResearchCopilotTUI:
         table.add_column("Status", width=12)
         for link in links:
             table.add_row(link.entity_type, link.relation, link.title, link.status or "—")
-        return Panel(table, title="Links modal", border_style="cyan")
+        return Panel(self._scroll_panel_content(table, "links_modal"), title="Links modal", border_style="cyan")
 
     def _render_palette_modal(self) -> RenderableType:
         entries = self._palette_entries()
@@ -1019,7 +1041,7 @@ class ResearchCopilotTUI:
         for index, entry in enumerate(entries):
             selected = "▶" if index == self.palette_index else " "
             table.add_row(selected, entry["key"], entry["label"], entry["description"])
-        return Panel(table, title="Palette", border_style="cyan")
+        return Panel(self._scroll_panel_content(table, "palette_modal"), title="Palette", border_style="cyan")
 
     def _render_logs_modal(self) -> RenderableType:
         content = Group(
@@ -1029,7 +1051,7 @@ class ResearchCopilotTUI:
             Text("\nStderr", style="bold"),
             Text(self.logs_modal_stderr or "(no stderr)", style="dim"),
         )
-        return Panel(content, title="Full logs", border_style="cyan")
+        return Panel(self._scroll_panel_content(content, "logs_modal"), title="Full logs", border_style="cyan")
 
     def _render_footer(self) -> RenderableType:
         selected = self._focus_label()
@@ -1349,6 +1371,52 @@ class ResearchCopilotTUI:
         width, _ = self._viewport_dimensions()
         return self._is_short_layout() or width < MEDIUM_WIDTH
 
+    def _scroll_width(self, scroll_key: str) -> int:
+        width, _ = self._viewport_dimensions()
+        if scroll_key in {"logs_modal", "links_modal", "palette_modal", "help_modal", "research_detail"}:
+            return max(48, width - 8)
+        if scroll_key in {"run_detail", "experiment_detail", "overview_focus"}:
+            if self._is_short_layout() or self._is_narrow_layout():
+                return max(48, width - 8)
+            if self._is_medium_layout():
+                return max(42, int(width * 0.55) - 8)
+            return max(36, int(width * 0.43) - 8)
+        if scroll_key == "runtime_card":
+            if self._is_short_layout() or self._is_narrow_layout():
+                return max(48, width - 8)
+            return max(36, int(width * 0.43) - 8)
+        return max(48, width - 8)
+
+    def _scroll_height(self, scroll_key: str) -> int:
+        _, height = self._viewport_dimensions()
+        if scroll_key in {"logs_modal", "links_modal", "palette_modal", "help_modal"}:
+            return max(8, height - 8)
+        if scroll_key == "runtime_card":
+            if self._is_short_layout():
+                return 8
+            if self._is_narrow_layout():
+                return 10
+            if self._is_medium_layout():
+                return max(8, (height // 3) - 1)
+            return max(8, (height // 3) - 1)
+        if scroll_key in {"run_detail", "experiment_detail", "overview_focus", "research_detail"}:
+            if self._is_short_layout():
+                return 10
+            if self._is_narrow_layout():
+                return max(10, (height // 3))
+            if self._is_medium_layout():
+                return max(10, (height // 3))
+            return max(12, (height // 2) - 6)
+        return max(8, height - 8)
+
+    def _scroll_panel_content(self, renderable: RenderableType, scroll_key: str) -> RenderableType:
+        return self._scroll_renderable(
+            renderable,
+            scroll_key=scroll_key,
+            width=self._scroll_width(scroll_key),
+            max_lines=self._scroll_height(scroll_key),
+        )
+
     def _render_current_research_table(self, limit: int | None = None) -> RenderableType:
         pane = self.current_pane
         if pane == "papers":
@@ -1565,6 +1633,7 @@ class ResearchCopilotTUI:
         self.show_help = False
         self.show_links_modal = False
         self.show_palette = False
+        self._reset_scroll_state()
 
     def _open_focused_item(self) -> None:
         if self.current_screen == "overview":
@@ -1732,6 +1801,86 @@ class ResearchCopilotTUI:
     def _bounded_index(self, value: int, length: int) -> int:
         return min(value, length - 1) if length else 0
 
+    def _reset_scroll_state(self) -> None:
+        self.scroll_offsets.clear()
+        self.scroll_max_offsets.clear()
+        self.scroll_page_sizes.clear()
+
+    def _active_scroll_key(self) -> str | None:
+        if self.show_logs_modal:
+            return "logs_modal"
+        if self.show_links_modal:
+            return "links_modal"
+        if self.show_palette:
+            return "palette_modal"
+        if self.show_help:
+            return "help_modal"
+        if self.current_screen == "runs":
+            return "run_detail"
+        if self.current_screen == "experiments":
+            return "experiment_detail"
+        if self.current_screen == "research":
+            return "research_detail"
+        if self.current_screen == "overview":
+            if self.snapshot.has_runtime:
+                return "runtime_card"
+            if self.snapshot.jobs or self.snapshot.experiments:
+                return "overview_focus"
+        return None
+
+    def _scroll_active_renderable(self, direction: int) -> bool:
+        scroll_key = self._active_scroll_key()
+        if scroll_key is None:
+            return False
+        max_offset = self.scroll_max_offsets.get(scroll_key, 0)
+        if max_offset <= 0:
+            return False
+        page_size = max(1, self.scroll_page_sizes.get(scroll_key, 1))
+        current = self.scroll_offsets.get(scroll_key, 0)
+        target = max(0, min(max_offset, current + (page_size * direction)))
+        if target == current:
+            return False
+        self.scroll_offsets[scroll_key] = target
+        return True
+
+    def _scroll_renderable(
+        self,
+        renderable: RenderableType,
+        *,
+        scroll_key: str,
+        width: int,
+        max_lines: int,
+    ) -> RenderableType:
+        if max_lines <= 2:
+            return renderable
+        console = Console(width=max(20, width))
+        options = console.options.update(width=max(20, width))
+        lines = console.render_lines(renderable, options, pad=False)
+        visible_content_lines = max(1, max_lines - 1)
+        max_offset = max(0, len(lines) - visible_content_lines)
+        self.scroll_max_offsets[scroll_key] = max_offset
+        self.scroll_page_sizes[scroll_key] = max(1, visible_content_lines - 1)
+        if max_offset <= 0:
+            self.scroll_offsets[scroll_key] = 0
+            return renderable
+
+        offset = min(self.scroll_offsets.get(scroll_key, 0), max_offset)
+        self.scroll_offsets[scroll_key] = offset
+        visible_lines = lines[offset : offset + visible_content_lines]
+
+        segments: list[Segment] = []
+        for line in visible_lines:
+            segments.extend(line)
+            segments.append(Segment.line())
+
+        hint = Text(
+            f"ctrl+u/d scroll • {offset + 1}-{min(offset + len(visible_lines), len(lines))} of {len(lines)}",
+            style="dim",
+        )
+        hint_line = console.render_lines(hint, options, pad=False)[0]
+        segments.extend(hint_line)
+        return Segments(segments)
+
     def _read_key(self, timeout: float | None = None) -> str:
         try:
             import msvcrt
@@ -1750,6 +1899,8 @@ class ResearchCopilotTUI:
                     "P": "down",
                     "K": "left",
                     "M": "right",
+                    "I": "pageup",
+                    "Q": "pagedown",
                     "\x0f": "shift+tab",
                 }.get(second, "")
             if first == "\r":
@@ -1778,6 +1929,10 @@ class ResearchCopilotTUI:
                         second = sys.stdin.read(1)
                         if second == "[":
                             third = sys.stdin.read(1)
+                            if third in {"5", "6"}:
+                                fourth = sys.stdin.read(1)
+                                if fourth == "~":
+                                    return {"5": "pageup", "6": "pagedown"}.get(third, "")
                             return {
                                 "A": "up",
                                 "B": "down",
