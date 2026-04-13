@@ -21,6 +21,8 @@ from research_copilot.integrations.mcp.tools import ToolArgumentError
 from research_copilot.mcp_servers.knowledge_base import _store
 from research_copilot.mcp_servers.slurm import _mock_jobs
 from research_copilot.research_state import (
+    load_codex_active_session,
+    load_codex_turn_summary,
     initialize_workspace,
     list_autonomous_runtime_events,
     load_autonomous_runtime,
@@ -131,6 +133,21 @@ def test_autonomous_runtime_tools_are_listed_when_runtime_lane_is_available() ->
     assert expected.issubset(tools)
     assert "Read-only" in tools["rc_autonomous_status"]["description"]
     assert "Side effects:" in tools["rc_autonomous_run"]["description"]
+
+
+def test_codex_runtime_tools_are_listed() -> None:
+    expected = {
+        "rc_codex_attach",
+        "rc_codex_status",
+        "rc_codex_report_turn",
+        "rc_codex_steer",
+        "rc_codex_drain_nudges",
+    }
+    tools = {tool["name"]: tool for tool in list_mcp_tools()}
+
+    assert expected.issubset(tools)
+    assert "Read-only" in tools["rc_codex_status"]["description"]
+    assert "Side effects:" in tools["rc_codex_report_turn"]["description"]
 
 
 @pytest.mark.asyncio
@@ -268,3 +285,49 @@ async def test_tools_call_returns_structured_error_for_invalid_arguments() -> No
     assert response is not None
     assert response["result"]["isError"] is True
     assert response["result"]["structuredContent"]["error"]["code"] == "INVALID_ARGUMENTS"
+
+
+@pytest.mark.asyncio
+async def test_codex_runtime_tools_share_service_contract(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    monkeypatch.chdir(tmp_path)
+    initialize_workspace()
+
+    attach_payload = await call_tool(
+        "rc_codex_attach",
+        {
+            "session_id": "codex-1",
+            "pane_id": "%81",
+            "window_name": "brain",
+        },
+    )
+    report_payload = await call_tool(
+        "rc_codex_report_turn",
+        {
+            "session_id": "codex-1",
+            "turn_number": 1,
+            "summary": "Reviewed the active experiment.",
+            "action": "review-results",
+            "experiment_id": "exp-1",
+        },
+    )
+    steer_payload = await call_tool(
+        "rc_codex_steer",
+        {
+            "session_id": "codex-1",
+            "kind": "request_summary",
+            "message": "Need a tighter recap.",
+        },
+    )
+    drain_payload = await call_tool("rc_codex_drain_nudges", {"session_id": "codex-1"})
+    status_payload = await call_tool(
+        "rc_codex_status",
+        {"session_id": "codex-1", "include_nudges": True},
+    )
+
+    assert attach_payload["session_id"] == "codex-1"
+    assert report_payload["accepted"] is True
+    assert steer_payload["pending_nudge_count"] == 1
+    assert len(drain_payload["drained"]) == 1
+    assert status_payload["pending_nudges"] == []
+    assert load_codex_active_session()["last_experiment_id"] == "exp-1"
+    assert load_codex_turn_summary("codex-1", 1) == "Reviewed the active experiment."

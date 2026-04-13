@@ -33,6 +33,13 @@ from research_copilot.services.research_ops import (
     list_context as list_context_service,
     set_context as set_context_service,
 )
+from research_copilot.services.codex_runtime import (
+    attach_codex_session,
+    codex_runtime_status,
+    drain_codex_nudges,
+    enqueue_codex_nudge,
+    ingest_codex_turn_report,
+)
 from research_copilot.services.workflows import (
     next_step as next_step_workflow,
     onboard as onboard_workflow,
@@ -457,6 +464,72 @@ async def rc_autonomous_resume(arguments: dict[str, Any]) -> dict[str, Any]:
     return payload
 
 
+async def rc_codex_attach(arguments: dict[str, Any]) -> dict[str, Any]:
+    return attach_codex_session(
+        session_id=str(arguments["session_id"]),
+        goal=str(arguments.get("goal", "")),
+        constraints=_normalize_list(arguments.get("constraints"), field_name="constraints"),
+        allowed_actions=_normalize_list(arguments.get("allowed_actions"), field_name="allowed_actions"),
+        status=str(arguments.get("status", "running")),
+        current_turn=arguments.get("current_turn"),
+        turn_state=str(arguments.get("turn_state", "")),
+        operator_mode=str(arguments.get("operator_mode", "steerable")),
+        transport=str(arguments.get("transport", "tmux-pane")),
+        pane_id=str(arguments.get("pane_id", "")),
+        window_name=str(arguments.get("window_name", "")),
+        session_name=str(arguments.get("session_name", "")),
+        workspace=str(arguments.get("workspace", "")) or str(resolve_workspace().workspace_dir),
+        profile_name=str(arguments.get("profile_name", "")),
+        autonomy_level=str(arguments.get("autonomy_level", "")),
+        actor_type=str(arguments.get("actor_type", "codex")),
+    )
+
+
+async def rc_codex_status(arguments: dict[str, Any]) -> dict[str, Any]:
+    return codex_runtime_status(
+        session_id=str(arguments.get("session_id", "")),
+        include_nudges=bool(arguments.get("include_nudges", False)),
+    )
+
+
+async def rc_codex_report_turn(arguments: dict[str, Any]) -> dict[str, Any]:
+    return ingest_codex_turn_report(
+        session_id=str(arguments["session_id"]),
+        turn_number=int(arguments["turn_number"]),
+        summary=str(arguments["summary"]),
+        action=str(arguments.get("action", "")),
+        artifacts=_normalize_list(arguments.get("artifacts"), field_name="artifacts"),
+        status=str(arguments.get("status", "")),
+        turn_state=str(arguments.get("turn_state", "")),
+        experiment_id=str(arguments.get("experiment_id", "")),
+        review_id=str(arguments.get("review_id", "")),
+        context_update=str(arguments.get("context_update", "")),
+        reported_at=str(arguments.get("reported_at", "")),
+        heartbeat_at=str(arguments.get("heartbeat_at", "")),
+        pane_id=str(arguments.get("pane_id", "")),
+        window_name=str(arguments.get("window_name", "")),
+        session_name=str(arguments.get("session_name", "")),
+        workspace=str(arguments.get("workspace", "")) or str(resolve_workspace().workspace_dir),
+    )
+
+
+async def rc_codex_steer(arguments: dict[str, Any]) -> dict[str, Any]:
+    return enqueue_codex_nudge(
+        session_id=str(arguments["session_id"]),
+        kind=str(arguments["kind"]),
+        message=str(arguments.get("message", "")),
+        payload=_normalize_objectish(arguments.get("payload"), field_name="payload"),
+        actor_type=str(arguments.get("actor_type", "codex")),
+    )
+
+
+async def rc_codex_drain_nudges(arguments: dict[str, Any]) -> dict[str, Any]:
+    return drain_codex_nudges(
+        session_id=str(arguments["session_id"]),
+        limit=arguments.get("limit"),
+    )
+
+
 TOOL_DEFINITIONS: tuple[McpToolDefinition, ...] = (
     McpToolDefinition(
         name="rc_status",
@@ -709,6 +782,126 @@ TOOL_DEFINITIONS: tuple[McpToolDefinition, ...] = (
             required=["owner_token"],
         ),
         handler=rc_autonomous_resume,
+    ),
+    McpToolDefinition(
+        name="rc_codex_attach",
+        description=(
+            "Register or reattach a Codex-managed session as the active research runtime. "
+            "Side effects: updates the active Codex runtime contract and transport metadata."
+        ),
+        input_schema=object_schema(
+            {
+                "session_id": string_field("Stable Codex session identifier."),
+                "goal": string_field("Optional operator-visible goal."),
+                "constraints": array_field("Repeatable session constraints."),
+                "allowed_actions": array_field("Repeatable allowed actions."),
+                "status": string_field("Optional session status override.", default="running"),
+                "current_turn": integer_field("Optional current turn number.", minimum=0),
+                "turn_state": string_field("Optional current turn state."),
+                "operator_mode": string_field(
+                    "Optional operator mode.",
+                    enum=["hands_off", "steerable", "paused"],
+                    default="steerable",
+                ),
+                "transport": string_field(
+                    "Transport type for this session.",
+                    enum=["tmux-pane", "managed-process"],
+                    default="tmux-pane",
+                ),
+                "pane_id": string_field("Optional tmux pane id."),
+                "window_name": string_field("Optional tmux window name."),
+                "session_name": string_field("Optional tmux session name."),
+                "workspace": string_field("Optional workspace path override."),
+                "profile_name": string_field("Optional profile label."),
+                "autonomy_level": string_field("Optional autonomy level label."),
+                "actor_type": string_field("Actor type recorded in provenance.", default="codex"),
+            },
+            required=["session_id"],
+        ),
+        handler=rc_codex_attach,
+    ),
+    McpToolDefinition(
+        name="rc_codex_status",
+        description=(
+            "Inspect the active or archived Codex runtime contract. "
+            "Read-only; no side effects."
+        ),
+        input_schema=object_schema(
+            {
+                "session_id": string_field("Optional session identifier; defaults to the active session."),
+                "include_nudges": {
+                    "type": "boolean",
+                    "description": "Include queued steering nudges in the response.",
+                    "default": False,
+                },
+            }
+        ),
+        handler=rc_codex_status,
+    ),
+    McpToolDefinition(
+        name="rc_codex_report_turn",
+        description=(
+            "Ingest one bounded Codex turn report into the shared runtime state. "
+            "Side effects: writes summary/event artifacts and refreshes active-session state."
+        ),
+        input_schema=object_schema(
+            {
+                "session_id": string_field("Stable Codex session identifier."),
+                "turn_number": integer_field("Bounded Codex turn number.", minimum=0),
+                "summary": string_field("Visible summary for this Codex turn."),
+                "action": string_field("Optional action label."),
+                "artifacts": array_field("Optional artifact identifiers."),
+                "status": string_field("Optional reported status override."),
+                "turn_state": string_field("Optional reported turn state."),
+                "experiment_id": string_field("Optional experiment id touched by this turn."),
+                "review_id": string_field("Optional review id touched by this turn."),
+                "context_update": string_field("Optional context key/value label updated by this turn."),
+                "reported_at": string_field("Optional report timestamp override."),
+                "heartbeat_at": string_field("Optional heartbeat timestamp override."),
+                "pane_id": string_field("Optional tmux pane id."),
+                "window_name": string_field("Optional tmux window name."),
+                "session_name": string_field("Optional tmux session name."),
+                "workspace": string_field("Optional workspace path override."),
+            },
+            required=["session_id", "turn_number", "summary"],
+        ),
+        handler=rc_codex_report_turn,
+    ),
+    McpToolDefinition(
+        name="rc_codex_steer",
+        description=(
+            "Enqueue one steering command for a Codex-managed session. "
+            "Side effects: writes to the shared steering queue and updates pending nudge state."
+        ),
+        input_schema=object_schema(
+            {
+                "session_id": string_field("Stable Codex session identifier."),
+                "kind": string_field(
+                    "Steering command kind.",
+                    enum=["nudge", "pause", "resume", "stop_after_turn", "request_summary"],
+                ),
+                "message": string_field("Optional steering message."),
+                "payload": object_or_string_field("Optional JSON object for richer steering metadata."),
+                "actor_type": string_field("Actor type recorded in provenance.", default="codex"),
+            },
+            required=["session_id", "kind"],
+        ),
+        handler=rc_codex_steer,
+    ),
+    McpToolDefinition(
+        name="rc_codex_drain_nudges",
+        description=(
+            "Drain pending steering nudges for a Codex-managed session. "
+            "Side effects: removes delivered nudges from the shared queue."
+        ),
+        input_schema=object_schema(
+            {
+                "session_id": string_field("Stable Codex session identifier."),
+                "limit": integer_field("Optional maximum nudges to drain.", minimum=1),
+            },
+            required=["session_id"],
+        ),
+        handler=rc_codex_drain_nudges,
     ),
 )
 

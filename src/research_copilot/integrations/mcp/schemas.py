@@ -100,4 +100,9 @@ APPROVED_V1_TOOL_NAMES = (
     "rc_autonomous_status",
     "rc_autonomous_stop",
     "rc_autonomous_resume",
+    "rc_codex_attach",
+    "rc_codex_status",
+    "rc_codex_report_turn",
+    "rc_codex_steer",
+    "rc_codex_drain_nudges",
 )

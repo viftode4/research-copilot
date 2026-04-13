@@ -14,6 +14,8 @@ from research_copilot.main import cli
 from research_copilot.mcp_servers.knowledge_base import _store
 from research_copilot.mcp_servers.slurm import MockJob, _mock_jobs
 from research_copilot.research_state import (
+    load_codex_active_session,
+    load_codex_turn_summary,
     list_autonomous_runtime_events,
     load_autonomous_runtime,
     load_autonomous_runtime_history,
@@ -504,6 +506,103 @@ def test_autonomous_stop_json_requires_owner_token(monkeypatch, tmp_path):
 
     assert result.exit_code != 0
     assert "owner_token is required" in result.output
+
+
+def test_runtime_help_lists_codex_runtime_commands():
+    runner = CliRunner()
+
+    result = runner.invoke(cli, ["runtime", "--help"])
+
+    assert result.exit_code == 0
+    assert "codex-attach" in result.output
+    assert "codex-status" in result.output
+    assert "codex-report" in result.output
+    assert "codex-nudge" in result.output
+    assert "codex-drain-nudges" in result.output
+
+
+def test_runtime_codex_commands_attach_report_and_drain(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+
+    attach_result = runner.invoke(
+        cli,
+        [
+            "runtime",
+            "codex-attach",
+            "--session-id",
+            "codex-1",
+            "--pane-id",
+            "%71",
+            "--window-name",
+            "brain",
+            "--json",
+        ],
+    )
+    report_result = runner.invoke(
+        cli,
+        [
+            "runtime",
+            "codex-report",
+            "--session-id",
+            "codex-1",
+            "--turn-number",
+            "1",
+            "--summary",
+            "Reviewed the latest results.",
+            "--action",
+            "review-results",
+            "--experiment-id",
+            "exp-1",
+            "--json",
+        ],
+    )
+    nudge_result = runner.invoke(
+        cli,
+        [
+            "runtime",
+            "codex-stop-after-turn",
+            "--session-id",
+            "codex-1",
+            "--message",
+            "Stop after the current turn.",
+            "--json",
+        ],
+    )
+    drain_result = runner.invoke(
+        cli,
+        [
+            "runtime",
+            "codex-drain-nudges",
+            "--session-id",
+            "codex-1",
+            "--json",
+        ],
+    )
+    status_result = runner.invoke(
+        cli,
+        [
+            "runtime",
+            "codex-status",
+            "--session-id",
+            "codex-1",
+            "--include-nudges",
+            "--json",
+        ],
+    )
+
+    assert attach_result.exit_code == 0, attach_result.output
+    assert report_result.exit_code == 0, report_result.output
+    assert nudge_result.exit_code == 0, nudge_result.output
+    assert drain_result.exit_code == 0, drain_result.output
+    assert status_result.exit_code == 0, status_result.output
+    assert json.loads(attach_result.output)["data"]["session_id"] == "codex-1"
+    assert json.loads(report_result.output)["data"]["accepted"] is True
+    assert json.loads(nudge_result.output)["data"]["nudge"]["kind"] == "stop_after_turn"
+    assert len(json.loads(drain_result.output)["data"]["drained"]) == 1
+    assert json.loads(status_result.output)["data"]["pending_nudge_count"] == 0
+    assert load_codex_active_session()["last_experiment_id"] == "exp-1"
+    assert load_codex_turn_summary("codex-1", 1) == "Reviewed the latest results."
 
 
 
