@@ -293,20 +293,18 @@ class ResearchCopilotTUI:
                     break
 
     def render(self) -> RenderableType:
-        return Group(
-            self._render_header(),
-            self._render_tabs(),
-            self._render_body(),
-            self._render_footer(),
-        )
+        header = self._render_header()
+        tabs = self._render_tabs()
+        footer = self._render_footer()
+        body = self._fit_body_to_viewport(self._render_body(), header=header, tabs=tabs, footer=footer)
+        return Group(header, tabs, body, footer)
 
     def render_static(self) -> RenderableType:
-        return Group(
-            self._render_header(),
-            self._render_tabs(),
-            self._render_static_body(),
-            self._render_footer(),
-        )
+        header = self._render_header()
+        tabs = self._render_tabs()
+        footer = self._render_footer()
+        body = self._fit_body_to_viewport(self._render_static_body(), header=header, tabs=tabs, footer=footer)
+        return Group(header, tabs, body, footer)
 
     def _render_header(self) -> RenderableType:
         runtime_summary = self._runtime_header_summary()
@@ -1372,6 +1370,42 @@ class ResearchCopilotTUI:
         fallback = shutil.get_terminal_size((120, 40))
         return fallback.columns, fallback.lines
 
+    def _renderable_line_count(self, renderable: RenderableType, *, width: int) -> int:
+        console = Console(width=max(20, width))
+        options = console.options.update(width=max(20, width))
+        return len(console.render_lines(renderable, options, pad=False))
+
+    def _body_height_budget(
+        self,
+        *,
+        header: RenderableType,
+        tabs: RenderableType,
+        footer: RenderableType,
+    ) -> int:
+        width, height = self._viewport_dimensions()
+        frame_lines = (
+            self._renderable_line_count(header, width=width)
+            + self._renderable_line_count(tabs, width=width)
+            + self._renderable_line_count(footer, width=width)
+        )
+        return max(1, height - frame_lines)
+
+    def _fit_body_to_viewport(
+        self,
+        body: RenderableType,
+        *,
+        header: RenderableType,
+        tabs: RenderableType,
+        footer: RenderableType,
+    ) -> RenderableType:
+        width, _ = self._viewport_dimensions()
+        return self._scroll_renderable(
+            body,
+            scroll_key="screen_body",
+            width=width,
+            max_lines=self._body_height_budget(header=header, tabs=tabs, footer=footer),
+        )
+
     def _is_narrow_layout(self) -> bool:
         width, _ = self._viewport_dimensions()
         return width < NARROW_WIDTH
@@ -1382,7 +1416,7 @@ class ResearchCopilotTUI:
 
     def _is_short_layout(self) -> bool:
         _, height = self._viewport_dimensions()
-        return height < SHORT_HEIGHT
+        return height <= SHORT_HEIGHT
 
     def _use_compact_runtime_card(self) -> bool:
         width, _ = self._viewport_dimensions()
@@ -1843,6 +1877,8 @@ class ResearchCopilotTUI:
                 return "runtime_card"
             if self.snapshot.jobs or self.snapshot.experiments:
                 return "overview_focus"
+        if self.scroll_max_offsets.get("screen_body", 0) > 0:
+            return "screen_body"
         return None
 
     def _scroll_active_renderable(self, direction: int) -> bool:
@@ -1896,6 +1932,7 @@ class ResearchCopilotTUI:
         )
         hint_line = console.render_lines(hint, options, pad=False)[0]
         segments.extend(hint_line)
+        segments.append(Segment.line())
         return Segments(segments)
 
     def _read_key(self, timeout: float | None = None) -> str:

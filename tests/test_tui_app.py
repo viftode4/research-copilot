@@ -151,6 +151,12 @@ def _render_text_with_width(renderable, width: int) -> str:
     return console.export_text()
 
 
+def _assert_render_fits_viewport(rendered: str, *, width: int, height: int) -> None:
+    lines = rendered.splitlines()
+    assert len(lines) <= height
+    assert max((len(line) for line in lines), default=0) <= width
+
+
 def test_tui_navigation_commands_cycle_views():
     app = ResearchCopilotTUI(snapshot_loader=_seeded_snapshot)
 
@@ -430,6 +436,54 @@ def test_research_screen_fits_short_viewport_with_compact_header_and_body():
 
     assert len(rendered.splitlines()) <= 28
     assert "Research focus" in rendered
+
+
+@pytest.mark.parametrize(
+    ("command", "expected_label"),
+    [
+        ("1", "Runs"),
+        ("2", "Run focus"),
+        ("3", "Experiment focus"),
+        ("4", "Research list — Insights"),
+    ],
+)
+def test_screens_clip_body_to_very_short_viewport(command: str, expected_label: str):
+    app = ResearchCopilotTUI(snapshot_loader=_seeded_snapshot)
+    app.viewport_width = 100
+    app.viewport_height = 18
+    app.handle_command(command)
+
+    rendered = _render_text_with_width(app.render(), width=100)
+
+    _assert_render_fits_viewport(rendered, width=100, height=18)
+    assert expected_label in rendered
+    assert app.scroll_max_offsets["screen_body"] > 0
+    assert "ctrl+u/d scroll" in rendered
+
+
+@pytest.mark.parametrize("width", [119, 120, 159, 160])
+@pytest.mark.parametrize("height", [31, 32])
+@pytest.mark.parametrize("command", ["1", "2", "3", "4"])
+def test_screens_fit_breakpoint_boundaries(width: int, height: int, command: str):
+    app = ResearchCopilotTUI(snapshot_loader=_seeded_snapshot)
+    app.viewport_width = width
+    app.viewport_height = height
+    app.handle_command(command)
+
+    rendered = _render_text_with_width(app.render(), width=width)
+
+    _assert_render_fits_viewport(rendered, width=width, height=height)
+
+
+def test_overview_static_render_fits_short_narrow_viewport():
+    app = ResearchCopilotTUI(snapshot_loader=_seeded_snapshot)
+    app.viewport_width = 80
+    app.viewport_height = 18
+
+    rendered = _render_text_with_width(app.render_static(), width=80)
+
+    _assert_render_fits_viewport(rendered, width=80, height=18)
+    assert "Research Copilot" in rendered
 
 
 def test_auto_refresh_runs_when_interval_elapses():
