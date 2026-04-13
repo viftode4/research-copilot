@@ -271,6 +271,38 @@ def test_tui_logs_modal_loads_full_logs(monkeypatch):
     assert "full stdout for job-1" in _render_text(app.render())
 
 
+def test_tui_logs_modal_supports_scroll_paging(monkeypatch):
+    stdout = "\n".join(f"stdout line {index}" for index in range(40))
+    stderr = "\n".join(f"stderr line {index}" for index in range(20))
+
+    monkeypatch.setattr(
+        "research_copilot.tui.app.fetch_full_entity_log",
+        lambda entity_id: type(
+            "FullLogRecord",
+            (),
+            {
+                "entity_id": entity_id,
+                "job_id": entity_id.removeprefix("run:"),
+                "stdout": stdout,
+                "stderr": stderr,
+            },
+        )(),
+    )
+    app = ResearchCopilotTUI(snapshot_loader=_seeded_snapshot)
+    app.viewport_width = 100
+    app.viewport_height = 20
+
+    app.handle_command("2")
+    app.handle_command("l")
+    initial = _render_text(app.render())
+    app.handle_key("\x04")
+    scrolled = _render_text(app.render())
+
+    assert "ctrl+u/d scroll" in initial
+    assert app.scroll_offsets["logs_modal"] > 0
+    assert initial != scrolled
+
+
 def test_tui_palette_executes_read_only_action(monkeypatch):
     seen: list[str] = []
 
@@ -361,7 +393,7 @@ def test_footer_switches_to_compact_hint_in_narrow_or_short_viewport():
 
     footer = _render_text(app._render_footer())
 
-    assert "1-4 • Tab • j/k • Enter" in footer
+    assert "1-4 • Tab • j/k • Ctrl+U/D • Enter" in footer
 
 
 def test_runs_screen_fits_short_viewport_with_compact_header_and_body():
@@ -477,6 +509,7 @@ def test_overview_renders_runtime_panel_when_runtime_lane_is_available():
         snapshot,
         **{
             runtime_field: {
+                "source": "codex",
                 "status": "running",
                 "iteration": 2,
                 "last_action": "review-results",
@@ -488,6 +521,130 @@ def test_overview_renders_runtime_panel_when_runtime_lane_is_available():
 
     rendered = _render_text(app.render())
 
-    assert "Runtime" in rendered
+    assert "Live Codex Runtime" in rendered
     assert "running" in rendered.lower()
     assert "review-results" in rendered
+
+
+def test_runtime_card_shows_summary_separately_from_last_action():
+    runtime_field = _runtime_field_name()
+    if runtime_field is None:
+        pytest.skip("Runtime snapshot field is not available in this checkout yet.")
+
+    snapshot = _seeded_snapshot()
+    snapshot = replace(
+        snapshot,
+        **{
+            runtime_field: {
+                "source": "codex",
+                "status": "running",
+                "iteration": 2,
+                "current_phase": "thinking",
+                "last_action": "review-results",
+                "summary": "First monitored Codex turn.",
+                "goal": "Live monitor validation",
+                "operator_mode": "steerable",
+                "pending_nudge_count": 2,
+                "last_heartbeat_at": "2026-04-13T01:05:00+00:00",
+            }
+        },
+    )
+    app = ResearchCopilotTUI(snapshot_loader=lambda: snapshot)
+
+    rendered = _render_text(app.render())
+
+    assert "Last action: review-results" in rendered
+    assert "Summary: First monitored Codex turn." in rendered
+    assert "Goal: Live monitor validation" in rendered
+    assert "Pending nudges: 2" in rendered
+    assert "Operator: steerable" in rendered
+
+
+def test_runtime_card_prefers_session_identity_and_shows_tmux_metadata():
+    runtime_field = _runtime_field_name()
+    if runtime_field is None:
+        pytest.skip("Runtime snapshot field is not available in this checkout yet.")
+
+    snapshot = _seeded_snapshot()
+    snapshot = replace(
+        snapshot,
+        **{
+            runtime_field: {
+                "source": "codex",
+                "session_id": "test-research-live",
+                "session_name": "omx-research-copilot-main",
+                "window_name": "python",
+                "pane_id": "%84",
+                "transport": "tmux-pane",
+                "workspace": "G:\\Projects\\test-research",
+                "status": "running",
+                "iteration": 2,
+                "current_phase": "thinking",
+                "last_action": "review-results",
+                "summary": "First monitored Codex turn.",
+                "last_heartbeat_at": "2026-04-13T01:05:00+00:00",
+            }
+        },
+    )
+    app = ResearchCopilotTUI(snapshot_loader=lambda: snapshot)
+    app.viewport_width = 120
+    app.viewport_height = 40
+
+    rendered = _render_text(app._render_runtime_card(compact=False))
+
+    assert "Session" in rendered
+    assert "test-research-live" in rendered
+    assert "tmux session" in rendered
+    assert "omx-research-copilot-main" in rendered
+    assert "Window" in rendered
+    assert "python" in rendered
+    assert "Pane" in rendered
+    assert "%84" in rendered
+    assert "Transport" in rendered
+    assert "tmux-pane" in rendered
+    assert "ctrl+u/d scroll" in rendered
+    app.handle_key("\x04")
+    scrolled = _render_text(app._render_runtime_card(compact=False))
+    assert "Workspace" in scrolled
+    assert "G:\\Projects\\test-research" in scrolled
+
+
+def test_research_detail_supports_scroll_paging():
+    snapshot = _seeded_snapshot()
+    long_content = "\n".join(f"detail line {index}" for index in range(60))
+    snapshot = replace(
+        snapshot,
+        insights=(
+            InsightRecord(
+                entity_id="insight:ins-1",
+                insight_id="ins-1",
+                title="Long insight",
+                category="finding",
+                confidence="0.91",
+                content=long_content,
+                created_at="2026-04-11T13:11:00+00:00",
+            ),
+        ),
+    )
+    app = ResearchCopilotTUI(snapshot_loader=lambda: snapshot)
+    app.viewport_width = 100
+    app.viewport_height = 40
+    app.handle_command("4")
+    initial = _render_text(app.render())
+    app.handle_key("\x04")
+    scrolled = _render_text(app.render())
+
+    assert "ctrl+u/d scroll" in initial
+    assert app.scroll_offsets["research_detail"] > 0
+    assert initial != scrolled
+
+
+def test_runtime_empty_state_mentions_codex_attach_and_autonomous_run():
+    app = ResearchCopilotTUI(snapshot_loader=_seeded_snapshot)
+    app.snapshot = replace(app.snapshot, runtime=None)
+
+    rendered = _render_text(app._render_runtime_card(compact=True))
+
+    assert "No live runtime detected." in rendered
+    assert "runtime codex-attach" in rendered
+    assert "workflow autonomous-run" in rendered

@@ -877,8 +877,8 @@ def process_is_running(pid: int | str | None) -> bool:
     if normalized_pid <= 0:
         return False
     if os.name == "nt":
-        result = subprocess.run(
-            [
+        popen_kwargs: dict[str, Any] = {
+            "args": [
                 "tasklist",
                 "/FI",
                 f"PID eq {normalized_pid}",
@@ -886,10 +886,14 @@ def process_is_running(pid: int | str | None) -> bool:
                 "CSV",
                 "/NH",
             ],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
+            "capture_output": True,
+            "text": True,
+            "check": False,
+        }
+        creationflags = int(getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        if creationflags:
+            popen_kwargs["creationflags"] = creationflags
+        result = subprocess.run(**popen_kwargs)
         stdout = result.stdout.strip()
         if not stdout or "No tasks are running" in stdout:
             return False
