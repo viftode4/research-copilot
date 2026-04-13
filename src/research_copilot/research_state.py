@@ -5,11 +5,12 @@ from __future__ import annotations
 import json
 import os
 import re
+import subprocess
 import shutil
 import time
 from contextlib import suppress
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -31,8 +32,17 @@ CANONICAL_DIRECTORIES = (
     "context",
     "profiles",
     "insights",
+    "runtime",
 )
 FILE_BACKED_FAMILIES = frozenset({"experiments", "insights", "papers", "context"})
+AUTONOMOUS_RUNTIME_SCHEMA_VERSION = "1.0"
+AUTONOMOUS_RUNTIME_FILENAME = "autonomous.json"
+AUTONOMOUS_RUNTIME_ACTIVE_STATUSES = frozenset({"running", "stopping"})
+AUTONOMOUS_RUNTIME_RESUMABLE_STATUSES = frozenset({"stopped", "stale"})
+AUTONOMOUS_RUNTIME_TERMINAL_STATUSES = frozenset({"completed", "failed"})
+RUNTIME_DIRNAME = "runtime"
+RUNTIME_HISTORY_DIRNAME = "history"
+RUNTIME_EVENTS_DIRNAME = "events"
 
 
 @dataclass(frozen=True)
@@ -50,6 +60,7 @@ class ResearchStatePaths:
     context: Path
     profiles: Path
     insights: Path
+    runtime: Path
 
 
 @dataclass(frozen=True)
@@ -61,6 +72,16 @@ class WorkspaceResolution:
     legacy_root: Path
     active_root: Path | None
     mode: str
+
+
+@dataclass(frozen=True)
+class AutonomousRuntimePaths:
+    """Typed path bundle for the persisted autonomous runtime layout."""
+
+    root: Path
+    active: Path
+    history: Path
+    events: Path
 
 
 def utc_now_iso() -> str:
@@ -187,7 +208,310 @@ def get_research_state_paths() -> ResearchStatePaths:
         context=root / "context",
         profiles=root / "profiles",
         insights=root / "insights",
+        runtime=root / "runtime",
     )
+
+
+def _parse_iso_timestamp(value: str) -> datetime | None:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def _iso_with_offset(timestamp: str, seconds: int) -> str:
+    parsed = _parse_iso_timestamp(timestamp)
+    if parsed is None:
+        parsed = datetime.now(timezone.utc)
+    return (parsed + timedelta(seconds=seconds)).isoformat()
+
+
+def _runtime_root(*, create: bool = False) -> Path:
+    root = ensure_research_root() if create else get_research_root()
+    runtime_root = root / RUNTIME_DIRNAME
+    if create:
+        runtime_root.mkdir(parents=True, exist_ok=True)
+    return runtime_root
+
+
+def get_autonomous_runtime_paths(*, create: bool = False) -> AutonomousRuntimePaths:
+    """Return typed paths for the autonomous runtime artifact family."""
+    root = _runtime_root(create=create)
+    history = root / RUNTIME_HISTORY_DIRNAME
+    events = root / RUNTIME_EVENTS_DIRNAME
+    if create:
+        history.mkdir(parents=True, exist_ok=True)
+        events.mkdir(parents=True, exist_ok=True)
+    return AutonomousRuntimePaths(
+        root=root,
+        active=root / AUTONOMOUS_RUNTIME_FILENAME,
+        history=history,
+        events=events,
+    )
+
+
+def autonomous_runtime_path() -> Path:
+    """Return the active autonomous runtime contract path."""
+    return get_autonomous_runtime_paths(create=False).active
+
+
+def autonomous_runtime_history_path(run_id: str) -> Path:
+    """Return the history snapshot path for one runtime."""
+    return get_autonomous_runtime_paths(create=True).history / f"{_slugify(run_id)}.json"
+
+
+def autonomous_runtime_events_path(run_id: str, *, create: bool = False) -> Path:
+    """Return the event directory for one runtime."""
+    paths = get_autonomous_runtime_paths(create=create)
+    event_root = paths.events / _slugify(run_id)
+    if create:
+        event_root.mkdir(parents=True, exist_ok=True)
+    return event_root
+
+
+def load_autonomous_runtime() -> dict[str, Any]:
+    """Load the active autonomous runtime payload if it exists."""
+    path = autonomous_runtime_path()
+    if not path.exists():
+        return {}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def save_autonomous_runtime(payload: dict[str, Any]) -> dict[str, Any]:
+    """Persist the active autonomous runtime contract atomically."""
+    normalized = dict(payload)
+    normalized["schema_version"] = str(
+        normalized.get("schema_version") or AUTONOMOUS_RUNTIME_SCHEMA_VERSION
+    )
+    _atomic_write_json(get_autonomous_runtime_paths(create=True).active, normalized)
+    return normalized
+
+
+def clear_autonomous_runtime() -> None:
+    """Remove the active autonomous runtime file if it exists."""
+    autonomous_runtime_path().unlink(missing_ok=True)
+
+
+def load_autonomous_runtime_history(run_id: str) -> dict[str, Any]:
+    """Load one archived autonomous runtime summary."""
+    path = autonomous_runtime_history_path(run_id)
+    if not path.exists():
+        return {}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def save_autonomous_runtime_history(payload: dict[str, Any]) -> dict[str, Any]:
+    """Persist one archived autonomous runtime summary."""
+    run_id = str(payload.get("run_id") or "").strip()
+    if not run_id:
+        raise ValueError("Autonomous runtime history requires a run_id")
+    normalized = dict(payload)
+    normalized["schema_version"] = str(
+        normalized.get("schema_version") or AUTONOMOUS_RUNTIME_SCHEMA_VERSION
+    )
+    _atomic_write_json(autonomous_runtime_history_path(run_id), normalized)
+    return normalized
+
+
+def archive_autonomous_runtime(payload: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Copy the active autonomous runtime payload into history."""
+    runtime = dict(payload or load_autonomous_runtime())
+    if not runtime:
+        return {}
+    runtime["archived_at"] = str(runtime.get("archived_at") or utc_now_iso())
+    return save_autonomous_runtime_history(runtime)
+
+
+def list_autonomous_runtime_events(run_id: str) -> list[dict[str, Any]]:
+    """Load all persisted event entries for one autonomous runtime."""
+    event_dir = autonomous_runtime_events_path(run_id, create=False)
+    if not event_dir.exists():
+        return []
+    events: list[dict[str, Any]] = []
+    for path in sorted(event_dir.glob("*.json")):
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            continue
+        if isinstance(payload, dict):
+            events.append(payload)
+    return events
+
+
+def append_autonomous_runtime_event(run_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+    """Append one ordered event entry for the autonomous runtime log."""
+    event_dir = autonomous_runtime_events_path(run_id, create=True)
+    existing_sequences = [
+        int(path.stem)
+        for path in event_dir.glob("*.json")
+        if path.stem.isdigit()
+    ]
+    sequence = (max(existing_sequences) if existing_sequences else 0) + 1
+    event = dict(payload)
+    event.setdefault("schema_version", AUTONOMOUS_RUNTIME_SCHEMA_VERSION)
+    event.setdefault("run_id", run_id)
+    event.setdefault("sequence", sequence)
+    event.setdefault("recorded_at", utc_now_iso())
+    _atomic_write_json(event_dir / f"{sequence:06d}.json", event)
+    return event
+
+
+def mint_owner_token() -> str:
+    """Return a fresh autonomous runtime owner token."""
+    return uuid4().hex
+
+
+def autonomous_runtime_is_active(payload: dict[str, Any]) -> bool:
+    """Return whether a runtime is in one of the active lifecycle states."""
+    return str(payload.get("status") or "").lower() in AUTONOMOUS_RUNTIME_ACTIVE_STATUSES
+
+
+def autonomous_runtime_is_resumable(payload: dict[str, Any]) -> bool:
+    """Return whether a runtime is resumable without new business inputs."""
+    return str(payload.get("status") or "").lower() in AUTONOMOUS_RUNTIME_RESUMABLE_STATUSES
+
+
+def autonomous_runtime_is_terminal(payload: dict[str, Any]) -> bool:
+    """Return whether a runtime is in a terminal lifecycle state."""
+    return str(payload.get("status") or "").lower() in AUTONOMOUS_RUNTIME_TERMINAL_STATUSES
+
+
+def autonomous_runtime_lease_expired(
+    payload: dict[str, Any], *, now: str | None = None
+) -> bool:
+    """Return whether the persisted lease has expired."""
+    lease_expires_at = str(payload.get("lease_expires_at") or "")
+    if not lease_expires_at:
+        return False
+    lease_deadline = _parse_iso_timestamp(lease_expires_at)
+    current = _parse_iso_timestamp(now or utc_now_iso())
+    if lease_deadline is None or current is None:
+        return False
+    return current >= lease_deadline
+
+
+def process_is_running(pid: int | str | None) -> bool:
+    """Return whether a process id still appears to be alive."""
+    if pid in ("", None):
+        return False
+    try:
+        normalized_pid = int(pid)
+    except (TypeError, ValueError):
+        return False
+    if normalized_pid <= 0:
+        return False
+    if os.name == "nt":
+        result = subprocess.run(
+            [
+                "tasklist",
+                "/FI",
+                f"PID eq {normalized_pid}",
+                "/FO",
+                "CSV",
+                "/NH",
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        stdout = result.stdout.strip()
+        if not stdout or "No tasks are running" in stdout:
+            return False
+        return f'"{normalized_pid}"' in stdout or f",{normalized_pid}," in stdout
+    try:
+        os.kill(normalized_pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return True
+
+
+def autonomous_runtime_is_stale(payload: dict[str, Any], *, now: str | None = None) -> bool:
+    """Return whether the runtime lease/owner fields indicate staleness."""
+    status = str(payload.get("status") or "").lower()
+    if status == "stale":
+        return True
+    if status not in AUTONOMOUS_RUNTIME_ACTIVE_STATUSES:
+        return False
+    if autonomous_runtime_lease_expired(payload, now=now):
+        return True
+    owner_pid = payload.get("owner_pid")
+    return owner_pid not in ("", None) and not process_is_running(owner_pid)
+
+
+def claim_autonomous_runtime_lease(
+    payload: dict[str, Any],
+    *,
+    owner_token: str,
+    owner_instance_id: str = "",
+    owner_pid: int | None = None,
+    lease_duration_seconds: int = 30,
+    timestamp: str | None = None,
+    allow_takeover: bool = False,
+) -> dict[str, Any]:
+    """Claim or refresh the autonomous runtime lease for one owner."""
+    normalized = dict(payload)
+    if not owner_token:
+        raise ValueError("owner_token is required to claim the autonomous runtime lease")
+    existing_owner = str(normalized.get("owner_token") or "")
+    existing_instance = str(normalized.get("owner_instance_id") or "")
+    provided_instance = str(owner_instance_id or "")
+    if existing_owner and existing_owner != owner_token:
+        if not allow_takeover and not autonomous_runtime_is_stale(normalized, now=timestamp):
+            raise RuntimeError("Autonomous runtime already has an active owner.")
+    if existing_owner == owner_token and existing_instance and provided_instance:
+        if existing_instance != provided_instance and not autonomous_runtime_is_stale(normalized, now=timestamp):
+            raise RuntimeError("Autonomous runtime lease is already bound to a different worker instance.")
+        existing_pid = normalized.get("owner_pid")
+        if (
+            existing_instance == provided_instance
+            and existing_pid not in ("", None)
+            and owner_pid is not None
+            and int(existing_pid) != int(owner_pid)
+            and process_is_running(existing_pid)
+        ):
+            raise RuntimeError("Autonomous runtime worker instance is already active.")
+    claimed_at = timestamp or utc_now_iso()
+    normalized["owner_token"] = owner_token
+    if provided_instance:
+        normalized["owner_instance_id"] = provided_instance
+    if owner_pid is not None:
+        normalized["owner_pid"] = int(owner_pid)
+    normalized["last_heartbeat_at"] = claimed_at
+    normalized["lease_expires_at"] = _iso_with_offset(claimed_at, lease_duration_seconds)
+    normalized["updated_at"] = claimed_at
+    if autonomous_runtime_is_resumable(normalized):
+        normalized["status"] = "running"
+    return normalized
+
+
+def mark_autonomous_runtime_stale(
+    payload: dict[str, Any],
+    *,
+    reason: str = "Autonomous runtime lease expired.",
+    timestamp: str | None = None,
+) -> dict[str, Any]:
+    """Return a runtime payload marked stale with a persisted reason."""
+    normalized = dict(payload)
+    marked_at = timestamp or utc_now_iso()
+    normalized["status"] = "stale"
+    normalized["updated_at"] = marked_at
+    normalized["summary"] = reason or str(normalized.get("summary") or "")
+    normalized["stop_reason"] = reason or str(normalized.get("stop_reason") or "")
+    return normalized
 
 
 def build_provenance(

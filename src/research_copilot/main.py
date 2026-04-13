@@ -4,11 +4,16 @@ from __future__ import annotations
 
 import asyncio
 import importlib
+import inspect
 import json
 import os
+from pathlib import Path
+import subprocess
+import sys
 import warnings
 from dataclasses import asdict
 from typing import Any
+from uuid import uuid4
 
 import click
 
@@ -98,6 +103,32 @@ Print AGENTS snippet: research-copilot mcp print-agents-snippet
 """
 
 JSON_SCHEMA_VERSION = "1.0"
+AUTONOMOUS_RUNTIME_MODULE = "research_copilot.services.autonomous_runtime"
+_AUTONOMOUS_START_CANDIDATES = (
+    "autonomous_run",
+    "start_autonomous_runtime",
+    "start_runtime",
+)
+_AUTONOMOUS_STATUS_CANDIDATES = (
+    "autonomous_status",
+    "get_autonomous_runtime_status",
+    "get_runtime_status",
+)
+_AUTONOMOUS_STOP_CANDIDATES = (
+    "autonomous_stop",
+    "stop_autonomous_runtime",
+    "request_autonomous_stop",
+)
+_AUTONOMOUS_RESUME_CANDIDATES = (
+    "autonomous_resume",
+    "resume_autonomous_runtime",
+    "resume_runtime",
+)
+_AUTONOMOUS_WORKER_CANDIDATES = (
+    "run_autonomous_worker",
+    "autonomous_worker",
+    "run_worker",
+)
 
 def _configure_workspace(workspace: str | None) -> tuple[str, str | None]:
     target = workspace or os.getcwd()
@@ -337,6 +368,197 @@ def _emit_result(payload: Any, as_json: bool, summary: str | None = None) -> Non
         click.echo(summary)
     else:
         click.echo(json.dumps(payload, indent=2, sort_keys=True, default=str))
+
+
+def _load_autonomous_runtime_callable(*candidate_names: str) -> Any:
+    try:
+        module = importlib.import_module(AUTONOMOUS_RUNTIME_MODULE)
+    except ModuleNotFoundError as exc:
+        raise click.ClickException("Autonomous runtime services are not available in this build.") from exc
+
+    for name in candidate_names:
+        candidate = getattr(module, name, None)
+        if callable(candidate):
+            return candidate
+
+    raise click.ClickException(
+        "Autonomous runtime services are missing an expected lifecycle entrypoint: "
+        + ", ".join(candidate_names)
+    )
+
+
+def _invoke_autonomous_runtime(*candidate_names: str, **kwargs: Any) -> Any:
+    handler = _load_autonomous_runtime_callable(*candidate_names)
+    signature = inspect.signature(handler)
+    if any(parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in signature.parameters.values()):
+        bound_kwargs = kwargs
+    else:
+        bound_kwargs = {key: value for key, value in kwargs.items() if key in signature.parameters}
+    result = handler(**bound_kwargs)
+    return _run_command(result) if inspect.isawaitable(result) else result
+
+
+def _parse_key_value_pairs(values: tuple[str, ...], *, option_name: str) -> dict[str, str]:
+    parsed: dict[str, str] = {}
+    for raw_item in values:
+        key, separator, raw_value = raw_item.partition("=")
+        if not separator or not key.strip():
+            raise click.ClickException(f"`--{option_name}` entries must use KEY=VALUE format.")
+        parsed[key.strip()] = raw_value
+    return parsed
+
+
+def _parse_json_object(raw_value: str, *, option_name: str) -> dict[str, Any]:
+    if not raw_value.strip():
+        return {}
+    try:
+        payload = json.loads(raw_value)
+    except json.JSONDecodeError as exc:
+        raise click.ClickException(f"`--{option_name}` must be valid JSON.") from exc
+    if not isinstance(payload, dict):
+        raise click.ClickException(f"`--{option_name}` must decode to a JSON object.")
+    return payload
+
+
+def _runtime_payload_view(payload: Any) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        return {}
+    runtime = payload.get("runtime")
+    return runtime if isinstance(runtime, dict) else payload
+
+
+def _runtime_value(payload: Any, key: str) -> Any:
+    if not isinstance(payload, dict):
+        return None
+    if key in payload:
+        return payload.get(key)
+    runtime = payload.get("runtime")
+    if isinstance(runtime, dict):
+        return runtime.get(key)
+    return None
+
+
+def _runtime_summary(payload: Any, fallback: str) -> str:
+    if isinstance(payload, dict):
+        summary = payload.get("summary")
+        if isinstance(summary, str) and summary.strip():
+            return summary
+        runtime = payload.get("runtime")
+        if isinstance(runtime, dict):
+            nested_summary = runtime.get("summary")
+            if isinstance(nested_summary, str) and nested_summary.strip():
+                return nested_summary
+    return fallback
+
+
+def _autonomous_status_unavailable_payload(run_id: str = "") -> dict[str, Any]:
+    return {
+        "run_id": run_id,
+        "status": "unavailable",
+        "available": False,
+        "summary": "Autonomous runtime services are not available in this build.",
+    }
+
+
+def _autonomous_worker_auth_dir() -> Path:
+    path = resolve_workspace().canonical_root / "runtime" / "auth"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _create_autonomous_worker_auth_file(run_id: str, owner_token: str) -> Path:
+    auth_path = _autonomous_worker_auth_dir() / f"{run_id}-{uuid4().hex}.json"
+    payload = {
+        "run_id": run_id,
+        "owner_token": owner_token,
+        "owner_instance_id": uuid4().hex,
+        "created_at": utc_now_iso(),
+    }
+    auth_path.write_text(json.dumps(payload), encoding="utf-8")
+    try:
+        os.chmod(auth_path, 0o600)
+    except OSError:
+        pass
+    return auth_path
+
+
+def _read_autonomous_worker_auth_file(auth_file: str) -> dict[str, Any]:
+    path = Path(auth_file)
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    finally:
+        path.unlink(missing_ok=True)
+    return payload if isinstance(payload, dict) else {}
+
+
+def _autonomous_worker_argv(run_id: str, auth_file: str) -> list[str]:
+    workspace = str(resolve_workspace().workspace_dir)
+    return [
+        sys.executable,
+        "-m",
+        "research_copilot.main",
+        "--workspace",
+        workspace,
+        "workflow",
+        "autonomous-worker",
+        "--run-id",
+        run_id,
+        "--auth-file",
+        auth_file,
+    ]
+
+
+def _autonomous_worker_env() -> dict[str, str]:
+    workspace = str(resolve_workspace().workspace_dir)
+    env = os.environ.copy()
+    env["RC_WORKING_DIR"] = workspace
+    src_root = str(Path(__file__).resolve().parent.parent)
+    existing_pythonpath = env.get("PYTHONPATH", "")
+    paths = [path for path in existing_pythonpath.split(os.pathsep) if path]
+    if src_root not in paths:
+        env["PYTHONPATH"] = os.pathsep.join([src_root, *paths]) if paths else src_root
+    return env
+
+
+def _should_launch_autonomous_worker(payload: Any) -> bool:
+    runtime = _runtime_payload_view(payload)
+    if not runtime:
+        return False
+    if runtime.get("worker_spawned") or runtime.get("worker_started"):
+        return False
+    if runtime.get("owner_pid"):
+        return False
+    return bool(_runtime_value(payload, "run_id") and _runtime_value(payload, "owner_token"))
+
+
+def _launch_autonomous_worker(payload: Any) -> None:
+    if not _should_launch_autonomous_worker(payload):
+        return
+
+    run_id = str(_runtime_value(payload, "run_id") or "").strip()
+    owner_token = str(_runtime_value(payload, "owner_token") or "").strip()
+    if not run_id or not owner_token:
+        raise click.ClickException("Autonomous runtime start did not return a run_id/owner_token pair.")
+    auth_file = _create_autonomous_worker_auth_file(run_id, owner_token)
+
+    popen_kwargs: dict[str, Any] = {
+        "args": _autonomous_worker_argv(run_id, str(auth_file)),
+        "cwd": str(resolve_workspace().workspace_dir),
+        "env": _autonomous_worker_env(),
+        "stdin": subprocess.DEVNULL,
+        "stdout": subprocess.DEVNULL,
+        "stderr": subprocess.DEVNULL,
+        "close_fds": True,
+    }
+    if os.name == "nt":
+        creationflags = 0
+        for flag_name in ("CREATE_NEW_PROCESS_GROUP", "DETACHED_PROCESS", "CREATE_NO_WINDOW"):
+            creationflags |= int(getattr(subprocess, flag_name, 0))
+        if creationflags:
+            popen_kwargs["creationflags"] = creationflags
+    else:
+        popen_kwargs["start_new_session"] = True
+    subprocess.Popen(**popen_kwargs)
 
 
 def _load_mcp_server_entrypoint() -> Any:
@@ -1058,6 +1280,208 @@ def workflow_next_step(experiment_id: str, as_json: bool):
     """Propose the next step after reviewing an experiment."""
     payload = _run_command(next_step_workflow(experiment_id=experiment_id))
     _emit_result(payload, as_json, "; ".join(payload["review"]["suggestions"]))
+
+
+@workflow.command("autonomous-run")
+@click.option("--goal", default="", help="Optional goal override for the persistent runtime.")
+@click.option("--profile", "profile_name", default="", help="Optional autonomous profile override.")
+@click.option("--success-criteria", default="", help="Optional success criteria override.")
+@click.option(
+    "--autonomy-level",
+    type=click.Choice(["guided", "bounded", "aggressive"], case_sensitive=False),
+    default=None,
+    help="Optional autonomy-level override.",
+)
+@click.option("--allowed-action", "allowed_actions", multiple=True, help="Repeatable allowed action.")
+@click.option("--constraint", "constraints", multiple=True, help="Repeatable constraint.")
+@click.option("--stop-condition", "stop_conditions", multiple=True, help="Repeatable stop condition.")
+@click.option(
+    "--command-template",
+    default="",
+    help="Reusable local command template for persistent run-experiment steps.",
+)
+@click.option(
+    "--template-var",
+    "template_vars",
+    multiple=True,
+    help="Persisted template variable in KEY=VALUE form.",
+)
+@click.option(
+    "--action-envelope",
+    default="",
+    help="Optional JSON object override for the normalized executable action envelope.",
+)
+@click.option("--max-iterations", type=click.IntRange(1, None), default=None)
+@click.option("--created-by", default="human", show_default=True)
+@click.option("--actor-type", default="human", show_default=True)
+@click.option("--json", "as_json", is_flag=True, help="Emit machine-readable JSON.")
+def workflow_autonomous_run(
+    goal: str,
+    profile_name: str,
+    success_criteria: str,
+    autonomy_level: str | None,
+    allowed_actions: tuple[str, ...],
+    constraints: tuple[str, ...],
+    stop_conditions: tuple[str, ...],
+    command_template: str,
+    template_vars: tuple[str, ...],
+    action_envelope: str,
+    max_iterations: int | None,
+    created_by: str,
+    actor_type: str,
+    as_json: bool,
+):
+    """Start the persistent autonomous runtime and detach its worker."""
+    _guard_machine_mutation(as_json)
+    payload = _invoke_autonomous_runtime(
+        *_AUTONOMOUS_START_CANDIDATES,
+        goal=goal,
+        success_criteria=success_criteria,
+        profile_name=profile_name,
+        active_profile=profile_name,
+        autonomy_level=autonomy_level or "",
+        allowed_actions=list(allowed_actions),
+        constraints=list(constraints),
+        stop_conditions=list(stop_conditions),
+        command_template=command_template,
+        template_vars=_parse_key_value_pairs(template_vars, option_name="template-var"),
+        action_envelope=_parse_json_object(action_envelope, option_name="action-envelope"),
+        max_iterations=max_iterations,
+        created_by=created_by,
+        actor_type=actor_type,
+        actor=actor_type,
+        spawn_worker=False,
+        launch_worker=False,
+        detach=False,
+    )
+    _launch_autonomous_worker(payload)
+    run_id = str(_runtime_value(payload, "run_id") or "unknown")
+    status_value = str(_runtime_value(payload, "status") or "running")
+    _emit_result(
+        payload,
+        as_json,
+        _runtime_summary(payload, f"Autonomous runtime {run_id} started with status {status_value}."),
+    )
+
+
+@workflow.command("autonomous-status")
+@click.option("--run-id", default="", help="Optional runtime id; defaults to the active runtime.")
+@click.option("--json", "as_json", is_flag=True, help="Emit machine-readable JSON.")
+def workflow_autonomous_status(run_id: str, as_json: bool):
+    """Inspect persisted autonomous runtime state without mutating it."""
+    try:
+        payload = _invoke_autonomous_runtime(
+            *_AUTONOMOUS_STATUS_CANDIDATES,
+            run_id=run_id,
+            runtime_id=run_id,
+        )
+    except click.ClickException as exc:
+        if "Autonomous runtime services are not available" not in str(exc):
+            raise
+        payload = _autonomous_status_unavailable_payload(run_id)
+    resolved_run_id = str(_runtime_value(payload, "run_id") or run_id or "active")
+    status_value = str(_runtime_value(payload, "status") or "unknown")
+    _emit_result(
+        payload,
+        as_json,
+        _runtime_summary(payload, f"Autonomous runtime {resolved_run_id} is {status_value}."),
+    )
+
+
+@workflow.command("autonomous-stop")
+@click.option("--run-id", default="", help="Optional runtime id; defaults to the active runtime.")
+@click.option("--owner-token", default="", help="Required runtime capability token for stop.")
+@click.option("--reason", default="", help="Optional operator stop reason.")
+@click.option("--created-by", default="human", show_default=True)
+@click.option("--actor-type", default="human", show_default=True)
+@click.option("--json", "as_json", is_flag=True, help="Emit machine-readable JSON.")
+def workflow_autonomous_stop(
+    run_id: str,
+    owner_token: str,
+    reason: str,
+    created_by: str,
+    actor_type: str,
+    as_json: bool,
+):
+    """Request a graceful stop for the persistent autonomous runtime."""
+    _guard_machine_mutation(as_json)
+    payload = _invoke_autonomous_runtime(
+        *_AUTONOMOUS_STOP_CANDIDATES,
+        run_id=run_id,
+        runtime_id=run_id,
+        reason=reason,
+        stop_reason=reason,
+        owner_token=owner_token,
+        token=owner_token,
+        created_by=created_by,
+        actor_type=actor_type,
+        actor=actor_type,
+    )
+    resolved_run_id = str(_runtime_value(payload, "run_id") or run_id or "active")
+    status_value = str(_runtime_value(payload, "status") or "stopping")
+    _emit_result(
+        payload,
+        as_json,
+        _runtime_summary(payload, f"Autonomous runtime {resolved_run_id} is now {status_value}."),
+    )
+
+
+@workflow.command("autonomous-resume")
+@click.option("--run-id", default="", help="Optional runtime id; defaults to the active runtime.")
+@click.option("--owner-token", default="", help="Required runtime capability token for resume.")
+@click.option("--created-by", default="human", show_default=True)
+@click.option("--actor-type", default="human", show_default=True)
+@click.option("--json", "as_json", is_flag=True, help="Emit machine-readable JSON.")
+def workflow_autonomous_resume(
+    run_id: str,
+    owner_token: str,
+    created_by: str,
+    actor_type: str,
+    as_json: bool,
+):
+    """Resume a stopped or stale persistent autonomous runtime."""
+    _guard_machine_mutation(as_json)
+    payload = _invoke_autonomous_runtime(
+        *_AUTONOMOUS_RESUME_CANDIDATES,
+        run_id=run_id,
+        runtime_id=run_id,
+        owner_token=owner_token,
+        token=owner_token,
+        created_by=created_by,
+        actor_type=actor_type,
+        actor=actor_type,
+        spawn_worker=False,
+        launch_worker=False,
+        detach=False,
+    )
+    _launch_autonomous_worker(payload)
+    resolved_run_id = str(_runtime_value(payload, "run_id") or run_id or "active")
+    status_value = str(_runtime_value(payload, "status") or "running")
+    _emit_result(
+        payload,
+        as_json,
+        _runtime_summary(payload, f"Autonomous runtime {resolved_run_id} resumed with status {status_value}."),
+    )
+
+
+@workflow.command("autonomous-worker", hidden=True)
+@click.option("--run-id", required=True, help="Persisted autonomous runtime id.")
+@click.option("--auth-file", default="", help="Protected worker auth file for the detached worker.")
+@click.option("--owner-token", default="", help="Backward-compatible direct owner token.")
+def workflow_autonomous_worker(run_id: str, auth_file: str, owner_token: str):
+    """Internal detached worker entrypoint for the autonomous runtime."""
+    auth_payload = _read_autonomous_worker_auth_file(auth_file) if auth_file else {}
+    resolved_owner_token = str(auth_payload.get("owner_token") or owner_token or "")
+    owner_instance_id = str(auth_payload.get("owner_instance_id") or "")
+    _invoke_autonomous_runtime(
+        *_AUTONOMOUS_WORKER_CANDIDATES,
+        run_id=run_id,
+        runtime_id=run_id,
+        owner_token=resolved_owner_token,
+        token=resolved_owner_token,
+        owner_instance_id=owner_instance_id,
+        worker_instance_id=owner_instance_id,
+    )
 
 
 def _prompt_csv(label: str, default: str = "") -> list[str]:

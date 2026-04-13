@@ -23,6 +23,7 @@ from research_copilot.tui.adapters import (
     JobRecord,
     LinkedRecord,
     PaperRecord,
+    RuntimeRecord,
     build_dashboard_snapshot,
     fetch_full_entity_log,
     format_timestamp,
@@ -286,6 +287,7 @@ class ResearchCopilotTUI:
         )
 
     def _render_header(self) -> RenderableType:
+        runtime_summary = self._runtime_header_summary()
         if self._is_short_layout():
             summary = Text(
                 "Active runs: "
@@ -296,9 +298,7 @@ class ResearchCopilotTUI:
                 f"Papers: {len(self.snapshot.papers)}",
                 style="bold cyan",
             )
-            subtitle = (
-                f"schema {self.snapshot.schema_version} • {self.snapshot.snapshot_state}"
-            )
+            subtitle = f"schema {self.snapshot.schema_version} • {self.snapshot.snapshot_state}{runtime_summary}"
             return Panel(summary, title="Research Copilot", subtitle=subtitle)
         metrics = Columns(
             [
@@ -314,7 +314,7 @@ class ResearchCopilotTUI:
         )
         subtitle = (
             f"Terminal workflow dashboard • schema {self.snapshot.schema_version} • "
-            f"{self.snapshot.snapshot_state}"
+            f"{self.snapshot.snapshot_state}{runtime_summary}"
         )
         return Panel(metrics, title="Research Copilot", subtitle=subtitle)
 
@@ -347,36 +347,88 @@ class ResearchCopilotTUI:
     def _render_static_body(self) -> RenderableType:
         if self.current_screen != "overview":
             return self._render_body()
-        return Group(
+        panels: list[RenderableType] = []
+        if self.snapshot.has_runtime:
+            panels.append(
+                Panel(
+                    self._render_runtime_card(compact=self._use_compact_runtime_card()),
+                    title="Autonomous Runtime",
+                    border_style=self._runtime_border_style(),
+                )
+            )
+        panels.extend(
+            [
             Panel(self._render_jobs_table(limit=8), title="Recent runs"),
             Panel(self._render_experiments_table(limit=8), title="Recent experiments"),
-            Panel(self._render_selected_summary() if (self.snapshot.jobs or self.snapshot.experiments) else self._render_getting_started(), title="Selected focus" if (self.snapshot.jobs or self.snapshot.experiments) else "Getting started"),
+            Panel(
+                self._render_overview_focus(compact=self._is_narrow_layout() or self._is_short_layout()),
+                title="Selected focus" if (self.snapshot.jobs or self.snapshot.experiments) else "Getting started",
+            ),
+            ]
         )
+        return Group(*panels)
 
     def _render_overview(self) -> RenderableType:
-        if not self.snapshot.jobs and not self.snapshot.experiments:
+        if not self.snapshot.jobs and not self.snapshot.experiments and not self.snapshot.has_runtime:
             return Panel(self._render_getting_started(), title="Getting started")
 
-        layout = Layout()
-        layout.split_row(
-            Layout(
-                Panel(
-                    self._render_jobs_table(limit=8),
-                    title="Runs",
-                    border_style=self._pane_style("runs"),
-                ),
-                ratio=2,
-            ),
-            Layout(
-                Panel(
-                    self._render_experiments_table(limit=8),
-                    title="Experiments",
-                    border_style=self._pane_style("experiments"),
-                ),
-                ratio=2,
-            ),
-            Layout(Panel(self._render_selected_summary(), title="Selected focus", border_style="cyan"), ratio=3),
+        runs_panel = Panel(
+            self._render_jobs_table(limit=4 if self._is_short_layout() else 8),
+            title="Runs",
+            border_style=self._pane_style("runs"),
         )
+        experiments_panel = Panel(
+            self._render_experiments_table(limit=4 if self._is_short_layout() else 8),
+            title="Experiments",
+            border_style=self._pane_style("experiments"),
+        )
+        focus_panel = Panel(
+            self._render_overview_focus(compact=self._is_narrow_layout() or self._is_short_layout()),
+            title="Selected focus" if (self.snapshot.jobs or self.snapshot.experiments) else "Getting started",
+            border_style="cyan",
+        )
+        runtime_panel = Panel(
+            self._render_runtime_card(compact=self._use_compact_runtime_card()),
+            title="Autonomous Runtime",
+            border_style=self._runtime_border_style(),
+        )
+
+        if self._is_short_layout():
+            panels: list[RenderableType] = []
+            if self.snapshot.has_runtime:
+                panels.append(runtime_panel)
+            panels.extend([runs_panel, experiments_panel, focus_panel])
+            return Group(*panels)
+
+        if self._is_narrow_layout():
+            panels = [runs_panel, experiments_panel]
+            if self.snapshot.has_runtime:
+                panels.append(runtime_panel)
+            panels.append(focus_panel)
+            return Group(*panels)
+
+        if self._is_medium_layout():
+            layout = Layout()
+            if self.snapshot.has_runtime:
+                layout.split_column(Layout(name="top", ratio=2), Layout(name="bottom", ratio=1))
+                layout["top"].split_row(Layout(runs_panel, ratio=2), Layout(experiments_panel, ratio=2))
+                layout["bottom"].split_row(Layout(runtime_panel, ratio=2), Layout(focus_panel, ratio=3))
+                return layout
+            layout.split_row(Layout(runs_panel, ratio=2), Layout(experiments_panel, ratio=2), Layout(focus_panel, ratio=3))
+            return layout
+
+        if self.snapshot.has_runtime:
+            layout = Layout()
+            layout.split_row(
+                Layout(runs_panel, ratio=2),
+                Layout(experiments_panel, ratio=2),
+                Layout(name="side", ratio=3),
+            )
+            layout["side"].split_column(Layout(runtime_panel, ratio=2), Layout(focus_panel, ratio=3))
+            return layout
+
+        layout = Layout()
+        layout.split_row(Layout(runs_panel, ratio=2), Layout(experiments_panel, ratio=2), Layout(focus_panel, ratio=3))
         return layout
 
     def _render_runs_screen(self) -> RenderableType:
@@ -784,6 +836,81 @@ class ResearchCopilotTUI:
             self._render_links_summary(self._selected_job_entity_id()),
         )
 
+    def _render_overview_focus(self, *, compact: bool) -> RenderableType:
+        if not (self.snapshot.jobs or self.snapshot.experiments):
+            return self._render_getting_started()
+        if compact:
+            if self.current_pane == "experiments":
+                return self._render_compact_experiment_detail(self._selected_experiment())
+            return self._render_compact_job_detail(self._selected_job())
+        return self._render_selected_summary()
+
+    def _render_runtime_card(self, *, compact: bool) -> RenderableType:
+        runtime = self._runtime_record()
+        if runtime is None:
+            return Text(
+                "No autonomous runtime detected. Start one with workflow autonomous-run.",
+                style="dim",
+            )
+
+        iteration_value = (
+            f"{runtime.iteration}/{runtime.max_iterations}"
+            if runtime.max_iterations is not None
+            else str(runtime.iteration)
+        )
+        header = Text.assemble(
+            (self._runtime_status_label(runtime.status), self._status_style(runtime.status)),
+            (" • ", "dim"),
+            (runtime.current_phase or "phase unknown", "dim"),
+        )
+        freshness = Text(f"Freshness: {runtime.freshness_label}", style=self._freshness_style(runtime))
+        last_action = runtime.last_action or runtime.summary or "No bounded action recorded yet."
+        stop_note = runtime.stop_reason or (
+            "Graceful stop requested." if runtime.stop_requested_at and runtime.status == "stopping" else ""
+        )
+
+        if compact:
+            compact_lines: list[RenderableType] = [
+                header,
+                freshness,
+                Text(
+                    f"Iteration: {iteration_value} • Profile: {runtime.profile_name or '—'}",
+                    style="dim",
+                ),
+                Text(f"Last action: {self._truncate_inline(last_action, limit=72)}"),
+            ]
+            if stop_note:
+                compact_lines.append(
+                    Text(f"Stop: {self._truncate_inline(stop_note, limit=72)}", style="bold red")
+                )
+            return Group(*compact_lines)
+
+        info = Table.grid(expand=True)
+        info.add_column(style="bold cyan", width=14)
+        info.add_column()
+        info.add_row("Status", Text(self._runtime_status_label(runtime.status), style=self._status_style(runtime.status)))
+        info.add_row("Freshness", Text(runtime.freshness_label, style=self._freshness_style(runtime)))
+        info.add_row("Phase", runtime.current_phase or "—")
+        info.add_row("Iteration", iteration_value)
+        info.add_row("Profile", runtime.profile_name or "—")
+        info.add_row("Autonomy", runtime.autonomy_level or "—")
+        info.add_row("Heartbeat", format_timestamp(runtime.last_heartbeat_at))
+        info.add_row("Updated", format_timestamp(runtime.updated_at))
+        info.add_row("Last action", self._truncate_inline(last_action, limit=48))
+        if runtime.last_action_status:
+            info.add_row("Action state", runtime.last_action_status)
+        if runtime.last_experiment_id:
+            info.add_row("Experiment", runtime.last_experiment_id)
+        if runtime.consecutive_failures:
+            info.add_row("Failures", str(runtime.consecutive_failures))
+
+        details: list[RenderableType] = [info]
+        if runtime.goal:
+            details.extend([Text("\nGoal", style="bold"), Text(runtime.goal)])
+        if stop_note:
+            details.extend([Text("\nStop reason", style="bold red"), Text(stop_note, style="red")])
+        return Group(*details)
+
     def _render_selected_research_detail(self) -> RenderableType:
         if self.current_pane == "papers":
             return self._render_paper_detail(self._selected_paper())
@@ -1085,6 +1212,86 @@ class ResearchCopilotTUI:
     def _focus_label(self) -> str:
         return f"{self.current_screen}/{self.current_pane}"
 
+    def _runtime_record(self) -> RuntimeRecord | None:
+        runtime = self.snapshot.runtime
+        if runtime is None or isinstance(runtime, RuntimeRecord):
+            return runtime
+        if not isinstance(runtime, dict):
+            return None
+        status = str(runtime.get("status") or "unknown")
+        freshness_label = str(
+            runtime.get("freshness_label")
+            or ("heartbeat recorded" if runtime.get("last_heartbeat_at") else "no heartbeat")
+        )
+        freshness_state = str(runtime.get("freshness_state") or "unknown")
+        return RuntimeRecord(
+            run_id=str(runtime.get("run_id") or ""),
+            status=status,
+            current_phase=str(runtime.get("current_phase") or ""),
+            iteration=int(runtime.get("iteration") or 0),
+            max_iterations=(
+                int(runtime["max_iterations"])
+                if runtime.get("max_iterations") not in ("", None)
+                else None
+            ),
+            goal=str(runtime.get("goal") or ""),
+            profile_name=str(runtime.get("profile_name") or ""),
+            autonomy_level=str(runtime.get("autonomy_level") or ""),
+            summary=str(runtime.get("summary") or ""),
+            last_action=str(runtime.get("last_action") or ""),
+            last_action_status=str(runtime.get("last_action_status") or ""),
+            last_experiment_id=str(runtime.get("last_experiment_id") or ""),
+            started_at=str(runtime.get("started_at") or ""),
+            updated_at=str(runtime.get("updated_at") or ""),
+            last_heartbeat_at=str(runtime.get("last_heartbeat_at") or ""),
+            lease_expires_at=str(runtime.get("lease_expires_at") or ""),
+            completed_at=str(runtime.get("completed_at") or ""),
+            stop_requested_at=str(runtime.get("stop_requested_at") or ""),
+            stop_reason=str(runtime.get("stop_reason") or ""),
+            consecutive_failures=int(runtime.get("consecutive_failures") or 0),
+            freshness_label=freshness_label,
+            freshness_state=freshness_state,
+            is_stale=bool(runtime.get("is_stale")) or status == "stale",
+            is_active=bool(runtime.get("is_active")) or status in {"running", "stopping"},
+        )
+
+    def _runtime_header_summary(self) -> str:
+        runtime = self._runtime_record()
+        if runtime is None:
+            return ""
+        return (
+            f" • runtime {self._runtime_status_label(runtime.status).lower()}"
+            f" • {runtime.freshness_label}"
+        )
+
+    def _runtime_status_label(self, status: str) -> str:
+        return status.replace("_", " ") if status else "unknown"
+
+    def _runtime_border_style(self) -> str:
+        runtime = self._runtime_record()
+        if runtime is None:
+            return "grey35"
+        if runtime.status in {"completed"}:
+            return "green"
+        if runtime.status in {"failed", "stale"} or runtime.is_stale:
+            return "red"
+        if runtime.status in {"running", "stopping"}:
+            return "yellow"
+        if runtime.status == "stopped":
+            return "cyan"
+        return "grey35"
+
+    def _freshness_style(self, runtime: RuntimeRecord) -> str:
+        if runtime.freshness_state == "fresh":
+            return "green"
+        if runtime.freshness_state == "lagging":
+            return "yellow"
+        if runtime.freshness_state == "stale":
+            return "red"
+        if runtime.freshness_state == "terminal":
+            return "cyan"
+        return "dim"
+
     def _truncate_inline(self, value: str, limit: int = 96) -> str:
         return value if len(value) <= limit else value[: limit - 1] + "…"
 
@@ -1105,6 +1312,10 @@ class ResearchCopilotTUI:
     def _is_short_layout(self) -> bool:
         _, height = self._viewport_dimensions()
         return height < SHORT_HEIGHT
+
+    def _use_compact_runtime_card(self) -> bool:
+        width, _ = self._viewport_dimensions()
+        return self._is_short_layout() or width < MEDIUM_WIDTH
 
     def _render_current_research_table(self, limit: int | None = None) -> RenderableType:
         pane = self.current_pane
@@ -1239,12 +1450,14 @@ class ResearchCopilotTUI:
 
     def _status_style(self, value: str) -> str:
         lowered = value.lower()
-        if lowered in {"running", "pending", "planned"}:
+        if lowered in {"running", "pending", "planned", "queued", "stopping"}:
             return "bold yellow"
-        if lowered in {"completed"}:
+        if lowered in {"completed", "succeeded"}:
             return "bold green"
-        if lowered in {"failed", "cancelled"}:
+        if lowered in {"failed", "cancelled", "stale", "blocked"}:
             return "bold red"
+        if lowered in {"stopped"}:
+            return "bold cyan"
         return "bold white"
 
     def _cycle_filter(self) -> None:

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from research_copilot.research_state import save_onboarding_contract
@@ -34,6 +36,8 @@ def test_run_plan_returns_agent_safe_contract():
     assert contract["status"] == "ready"
     assert contract["lane_count"] == 3
     assert "--execute" in contract["notes"][1]
+    assert "persistent" not in json.dumps(contract).lower()
+    assert "runtime_id" not in contract
 
 
 def test_unknown_profile_returns_none_and_run_plan_errors():
@@ -88,3 +92,6 @@ async def test_execute_ultrawork_profile_runs_bounded_local_loop(monkeypatch, tm
     assert payload["steps"][0]["step"] == "run-experiment"
     assert payload["steps"][1]["step"] == "overfitting-check"
     assert payload["steps"][2]["step"] == "next-step"
+    serialized = json.dumps(payload).lower()
+    assert "autonomous" not in serialized
+    assert "resume" not in serialized

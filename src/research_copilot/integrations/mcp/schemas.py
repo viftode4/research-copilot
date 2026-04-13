@@ -96,4 +96,8 @@ APPROVED_V1_TOOL_NAMES = (
     "rc_next_step",
     "rc_get_context",
     "rc_set_context",
+    "rc_autonomous_run",
+    "rc_autonomous_status",
+    "rc_autonomous_stop",
+    "rc_autonomous_resume",
 )

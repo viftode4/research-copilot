@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
+import json
 from typing import Any
 
 from research_copilot.mcp_servers.slurm import MockJob
@@ -37,6 +38,76 @@ EXPERIMENT_STATUS_MAP = {
     "cancelled": "cancelled",
     "blocked": "blocked",
 }
+
+
+def _load_runtime_state() -> dict[str, Any]:
+    """Load the persisted autonomous runtime artifact when present."""
+
+    path = resolve_workspace().canonical_root / "runtime" / "autonomous.json"
+    if not path.exists():
+        return {}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _string_value(value: Any) -> str:
+    if value in ("", None):
+        return ""
+    return str(value)
+
+
+def _optional_int(value: Any) -> int | None:
+    if value in ("", None):
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _runtime_last_action(value: Any) -> str:
+    if isinstance(value, Mapping):
+        for key in ("summary", "label", "name", "action", "type", "command"):
+            candidate = _string_value(value.get(key))
+            if candidate:
+                return candidate
+        return ""
+    return _string_value(value)
+
+
+def _build_runtime_snapshot() -> dict[str, Any]:
+    """Build a normalized autonomous runtime summary for snapshot consumers."""
+
+    payload = _load_runtime_state()
+    if not payload:
+        return {}
+
+    return {
+        "schema_version": _string_value(payload.get("schema_version")),
+        "run_id": _string_value(payload.get("run_id")),
+        "status": _string_value(payload.get("status")) or "unknown",
+        "goal": _string_value(payload.get("goal")),
+        "profile_name": _string_value(payload.get("profile_name")),
+        "autonomy_level": _string_value(payload.get("autonomy_level")),
+        "current_phase": _string_value(payload.get("current_phase")),
+        "iteration": _optional_int(payload.get("iteration")) or 0,
+        "max_iterations": _optional_int(payload.get("max_iterations")),
+        "summary": _string_value(payload.get("summary")),
+        "last_action": _runtime_last_action(payload.get("last_action")),
+        "last_action_status": _string_value(payload.get("last_action_status")),
+        "last_experiment_id": _string_value(payload.get("last_experiment_id")),
+        "started_at": _string_value(payload.get("started_at")),
+        "updated_at": _string_value(payload.get("updated_at")),
+        "last_heartbeat_at": _string_value(payload.get("last_heartbeat_at")),
+        "lease_expires_at": _string_value(payload.get("lease_expires_at")),
+        "completed_at": _string_value(payload.get("completed_at")),
+        "stop_requested_at": _string_value(payload.get("stop_requested_at")),
+        "stop_reason": _string_value(payload.get("stop_reason")),
+        "consecutive_failures": _optional_int(payload.get("consecutive_failures")) or 0,
+    }
 
 
 def _truncate_log(text: str, *, max_lines: int, max_chars: int) -> str:
@@ -428,6 +499,7 @@ def build_canonical_snapshot(
     """Build the canonical normalized workflow snapshot used by the v1a TUI."""
 
     service = ResearchOpsService(store=store, jobs=jobs)
+    runtime = _build_runtime_snapshot()
     state = service.snapshot(
         job_limit=max_items,
         experiment_limit=max_items,
@@ -499,6 +571,7 @@ def build_canonical_snapshot(
         "entities": dict(entities),
         "links": links,
         "actions": actions,
+        "runtime": runtime,
         "state_semantics": {
             "snapshot_state": "complete",
             "missing_value_kinds": list(MISSING_VALUE_KINDS),
@@ -641,4 +714,5 @@ def build_workflow_snapshot(
             "default_job_id": job_items[0]["job_id"] if job_items else None,
             "default_experiment_id": experiment_items[0]["id"] if experiment_items else None,
         },
+        "runtime": dict(canonical.get("runtime") or {}),
     }

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections import Counter, defaultdict
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 
 from research_copilot.services.research_ops import ACTIVE_JOB_STATUSES, ResearchOpsService
@@ -129,6 +129,34 @@ class FullLogRecord:
     stderr: str
 
 
+@dataclass(frozen=True)
+class RuntimeRecord:
+    run_id: str
+    status: str
+    current_phase: str
+    iteration: int
+    max_iterations: int | None
+    goal: str
+    profile_name: str
+    autonomy_level: str
+    summary: str
+    last_action: str
+    last_action_status: str
+    last_experiment_id: str
+    started_at: str
+    updated_at: str
+    last_heartbeat_at: str
+    lease_expires_at: str
+    completed_at: str
+    stop_requested_at: str
+    stop_reason: str
+    consecutive_failures: int
+    freshness_label: str
+    freshness_state: str
+    is_stale: bool
+    is_active: bool
+
+
 def fetch_full_run_log(
     entity_id: str,
     *,
@@ -191,6 +219,7 @@ class DashboardSnapshot:
     schema_version: str
     snapshot_owner: str
     snapshot_state: str
+    runtime: RuntimeRecord | None = None
 
     @property
     def active_jobs(self) -> int:
@@ -203,6 +232,10 @@ class DashboardSnapshot:
     @property
     def running_experiments(self) -> int:
         return self.experiment_status_counts.get("running", 0)
+
+    @property
+    def has_runtime(self) -> bool:
+        return self.runtime is not None
 
 
 def _normalized_job_status(status: str) -> str:
@@ -224,6 +257,93 @@ def _normalized_experiment_status(status: str) -> str:
         "cancelled": "cancelled",
         "blocked": "blocked",
     }.get(status, "unknown")
+
+
+def _relative_age_label(value: str, *, now: datetime | None = None) -> str:
+    parsed = _parse_timestamp(value)
+    if parsed is None:
+        return "unknown"
+    reference = now or datetime.now(timezone.utc)
+    delta_seconds = max(0, int((reference - parsed).total_seconds()))
+    if delta_seconds < 60:
+        return f"{delta_seconds}s ago"
+    if delta_seconds < 3600:
+        return f"{delta_seconds // 60}m ago"
+    if delta_seconds < 86400:
+        return f"{delta_seconds // 3600}h ago"
+    return f"{delta_seconds // 86400}d ago"
+
+
+def _build_runtime_record(snapshot: dict[str, Any]) -> RuntimeRecord | None:
+    runtime = snapshot.get("runtime") or {}
+    if not isinstance(runtime, dict) or not runtime:
+        return None
+
+    now = datetime.now(timezone.utc)
+    status = str(runtime.get("status") or "unknown")
+    heartbeat_at = str(runtime.get("last_heartbeat_at") or "")
+    updated_at = str(runtime.get("updated_at") or "")
+    completed_at = str(runtime.get("completed_at") or "")
+    lease_expires_at = str(runtime.get("lease_expires_at") or "")
+    lease_expires = _parse_timestamp(lease_expires_at)
+    heartbeat = _parse_timestamp(heartbeat_at)
+
+    freshness_reference = heartbeat_at or updated_at or completed_at
+    freshness_label = (
+        f"last update { _relative_age_label(freshness_reference, now=now) }"
+        if status in {"completed", "failed", "stopped"} and freshness_reference
+        else (
+            f"heartbeat { _relative_age_label(heartbeat_at, now=now) }"
+            if heartbeat_at
+            else "no heartbeat"
+        )
+    )
+    freshness_state = "unknown"
+    if status == "stale":
+        freshness_state = "stale"
+        if heartbeat_at:
+            freshness_label = f"stale • heartbeat {_relative_age_label(heartbeat_at, now=now)}"
+        else:
+            freshness_label = "stale • no heartbeat"
+    elif lease_expires is not None and lease_expires < now:
+        freshness_state = "stale"
+        freshness_label = (
+            f"lease expired • heartbeat {_relative_age_label(heartbeat_at, now=now)}"
+            if heartbeat_at
+            else "lease expired"
+        )
+    elif heartbeat is not None:
+        age_seconds = max(0, int((now - heartbeat).total_seconds()))
+        freshness_state = "fresh" if age_seconds <= 15 else "lagging" if age_seconds <= 60 else "stale"
+    elif status in {"completed", "failed", "stopped"}:
+        freshness_state = "terminal"
+
+    return RuntimeRecord(
+        run_id=str(runtime.get("run_id") or ""),
+        status=status,
+        current_phase=str(runtime.get("current_phase") or ""),
+        iteration=int(runtime.get("iteration") or 0),
+        max_iterations=int(runtime["max_iterations"]) if runtime.get("max_iterations") not in ("", None) else None,
+        goal=str(runtime.get("goal") or ""),
+        profile_name=str(runtime.get("profile_name") or ""),
+        autonomy_level=str(runtime.get("autonomy_level") or ""),
+        summary=str(runtime.get("summary") or ""),
+        last_action=str(runtime.get("last_action") or ""),
+        last_action_status=str(runtime.get("last_action_status") or ""),
+        last_experiment_id=str(runtime.get("last_experiment_id") or ""),
+        started_at=str(runtime.get("started_at") or ""),
+        updated_at=updated_at,
+        last_heartbeat_at=heartbeat_at,
+        lease_expires_at=lease_expires_at,
+        completed_at=completed_at,
+        stop_requested_at=str(runtime.get("stop_requested_at") or ""),
+        stop_reason=str(runtime.get("stop_reason") or ""),
+        consecutive_failures=int(runtime.get("consecutive_failures") or 0),
+        freshness_label=freshness_label,
+        freshness_state=freshness_state,
+        is_stale=freshness_state == "stale" or status == "stale",
+        is_active=status in {"running", "stopping"},
+    )
 
 
 def _build_links_index(snapshot: dict[str, Any]) -> dict[str, tuple[LinkedRecord, ...]]:
@@ -279,6 +399,7 @@ def build_dashboard_snapshot(*, service: ResearchOpsService | None = None) -> Da
     snapshot = build_canonical_snapshot(store=store, jobs=jobs, max_items=20)
     links_by_entity = _build_links_index(snapshot)
     actions_by_entity = _build_actions_index(snapshot)
+    runtime = _build_runtime_record(snapshot)
 
     run_entities = snapshot["entities"].get("run", [])
     experiment_entities = snapshot["entities"].get("experiment", [])
@@ -373,4 +494,5 @@ def build_dashboard_snapshot(*, service: ResearchOpsService | None = None) -> Da
         schema_version=str(snapshot["schema_version"]),
         snapshot_owner=str(snapshot["snapshot_owner"]),
         snapshot_state=str(snapshot["state_semantics"]["snapshot_state"]),
+        runtime=runtime,
     )

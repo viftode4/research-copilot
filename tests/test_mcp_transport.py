@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import importlib
 import json
 from io import BytesIO
 
@@ -15,10 +16,17 @@ from research_copilot.integrations.mcp.server import (
     run_stdio_server,
     write_delimited_message,
 )
-from research_copilot.integrations.mcp.tools import call_tool
+from research_copilot.integrations.mcp.tools import call_tool, list_mcp_tools
+from research_copilot.integrations.mcp.tools import ToolArgumentError
 from research_copilot.mcp_servers.knowledge_base import _store
 from research_copilot.mcp_servers.slurm import _mock_jobs
-from research_copilot.research_state import initialize_workspace
+from research_copilot.research_state import (
+    initialize_workspace,
+    list_autonomous_runtime_events,
+    load_autonomous_runtime,
+    load_autonomous_runtime_history,
+    save_autonomous_runtime,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -107,6 +115,24 @@ def test_stdio_server_initializes_and_lists_only_the_approved_v1_tools() -> None
     assert "Read-only" in next(tool["description"] for tool in tools if tool["name"] == "rc_status")
 
 
+def test_autonomous_runtime_tools_are_listed_when_runtime_lane_is_available() -> None:
+    expected = {
+        "rc_autonomous_run",
+        "rc_autonomous_status",
+        "rc_autonomous_stop",
+        "rc_autonomous_resume",
+    }
+    available = set(APPROVED_V1_TOOL_NAMES)
+    if not expected.issubset(available):
+        pytest.skip("Lane 2 MCP autonomous runtime tools are not available in this checkout yet.")
+
+    tools = {tool["name"]: tool for tool in list_mcp_tools()}
+
+    assert expected.issubset(tools)
+    assert "Read-only" in tools["rc_autonomous_status"]["description"]
+    assert "Side effects:" in tools["rc_autonomous_run"]["description"]
+
+
 @pytest.mark.asyncio
 async def test_tool_calls_route_through_shared_services(monkeypatch: pytest.MonkeyPatch) -> None:
     expected = {"workflow": "triage", "blockers": ["none"], "suggested_next_action": "review-results"}
@@ -120,6 +146,86 @@ async def test_tool_calls_route_through_shared_services(monkeypatch: pytest.Monk
     result = await call_tool("rc_triage", {"max_items": 3})
 
     assert result == expected
+
+
+@pytest.mark.asyncio
+async def test_autonomous_status_tool_routes_through_shared_service_when_available(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    if "rc_autonomous_status" not in APPROVED_V1_TOOL_NAMES:
+        pytest.skip("Lane 2 MCP autonomous runtime tools are not available in this checkout yet.")
+
+    tools_module = importlib.import_module("research_copilot.integrations.mcp.tools")
+    target_name = next(
+        (
+            name
+            for name in (
+                "autonomous_status_workflow",
+                "autonomous_status_service",
+                "get_autonomous_runtime_status",
+            )
+            if hasattr(tools_module, name)
+        ),
+        None,
+    )
+    if target_name is None:
+        pytest.skip("Autonomous MCP tool exists, but its shared-service binding is not discoverable yet.")
+
+    expected = {"run_id": "run-123", "status": "running", "iteration": 2}
+
+    async def fake_status(*_args, **_kwargs):
+        return expected
+
+    monkeypatch.setattr(f"research_copilot.integrations.mcp.tools.{target_name}", fake_status)
+
+    result = await call_tool("rc_autonomous_status", {})
+
+    assert result == expected
+
+
+@pytest.mark.asyncio
+async def test_autonomous_status_tool_reports_stale_without_mutating_runtime(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    if "rc_autonomous_status" not in APPROVED_V1_TOOL_NAMES:
+        pytest.skip("Lane 2 MCP autonomous runtime tools are not available in this checkout yet.")
+
+    monkeypatch.chdir(tmp_path)
+    initialize_workspace()
+    save_autonomous_runtime(
+        {
+            "schema_version": "1.0",
+            "run_id": "run-1",
+            "status": "running",
+            "goal": "proof",
+            "profile_name": "goal-chaser",
+            "iteration": 1,
+            "updated_at": "2026-04-13T00:00:00+00:00",
+            "started_at": "2026-04-13T00:00:00+00:00",
+            "last_heartbeat_at": "2026-04-13T00:00:00+00:00",
+            "lease_expires_at": "2026-04-13T00:00:01+00:00",
+            "owner_pid": 999999,
+            "owner_token": "secret-token",
+        }
+    )
+    before = json.dumps(load_autonomous_runtime(), sort_keys=True)
+
+    payload = await call_tool("rc_autonomous_status", {"run_id": "run-1"})
+
+    assert payload["status"] == "stale"
+    assert json.dumps(load_autonomous_runtime(), sort_keys=True) == before
+    assert load_autonomous_runtime_history("run-1") == {}
+    assert list_autonomous_runtime_events("run-1") == []
+
+
+@pytest.mark.asyncio
+async def test_autonomous_stop_tool_requires_owner_token() -> None:
+    if "rc_autonomous_stop" not in APPROVED_V1_TOOL_NAMES:
+        pytest.skip("Lane 2 MCP autonomous runtime tools are not available in this checkout yet.")
+
+    with pytest.raises(ToolArgumentError, match="Missing required argument 'owner_token'"):
+        await call_tool("rc_autonomous_stop", {"run_id": "run-1"})
 
 
 @pytest.mark.asyncio

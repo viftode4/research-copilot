@@ -13,6 +13,16 @@ import research_copilot.main as main_module
 from research_copilot.main import cli
 from research_copilot.mcp_servers.knowledge_base import _store
 from research_copilot.mcp_servers.slurm import MockJob, _mock_jobs
+from research_copilot.research_state import (
+    list_autonomous_runtime_events,
+    load_autonomous_runtime,
+    load_autonomous_runtime_history,
+    save_autonomous_runtime,
+)
+
+
+def _workflow_command(name: str):
+    return cli.commands["workflow"].commands.get(name)
 
 
 @pytest.fixture(autouse=True)
@@ -389,6 +399,111 @@ def test_workflow_help_lists_named_commands():
     assert "next-step" in result.output
     assert "Start with: research-copilot init" in result.output
     assert "Solo proof:" in result.output
+
+
+def test_workflow_help_lists_autonomous_lifecycle_commands_when_runtime_lane_is_available():
+    if _workflow_command("autonomous-status") is None:
+        pytest.skip("Lane 2 CLI lifecycle commands are not available in this checkout yet.")
+
+    runner = CliRunner()
+    result = runner.invoke(cli, ["workflow", "--help"])
+
+    assert result.exit_code == 0
+    assert "autonomous-run" in result.output
+    assert "autonomous-status" in result.output
+    assert "autonomous-stop" in result.output
+    assert "autonomous-resume" in result.output
+
+
+def test_autonomous_status_json_stays_read_only_when_runtime_lane_is_available(monkeypatch, tmp_path):
+    if _workflow_command("autonomous-status") is None:
+        pytest.skip("Lane 2 autonomous-status command is not available in this checkout yet.")
+
+    workspace = tmp_path / "legacy-workspace"
+    legacy_root = workspace / ".omx" / "research"
+    (legacy_root / "onboarding").mkdir(parents=True)
+    (legacy_root / "workspace.json").write_text(
+        json.dumps({"schema_version": "1.0", "workspace_root": str(workspace)}),
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(workspace)
+    runner = CliRunner()
+
+    result = runner.invoke(cli, ["workflow", "autonomous-status", "--json"])
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["ok"] is True
+    assert payload["workspace"] == str(workspace)
+    assert (workspace / ".research-copilot").exists() is False
+
+
+def test_autonomous_status_json_reports_stale_without_mutating_runtime(monkeypatch, tmp_path):
+    if _workflow_command("autonomous-status") is None:
+        pytest.skip("Lane 2 autonomous-status command is not available in this checkout yet.")
+
+    monkeypatch.chdir(tmp_path)
+    save_autonomous_runtime(
+        {
+            "schema_version": "1.0",
+            "run_id": "run-1",
+            "status": "running",
+            "goal": "proof",
+            "profile_name": "goal-chaser",
+            "iteration": 1,
+            "updated_at": "2026-04-13T00:00:00+00:00",
+            "started_at": "2026-04-13T00:00:00+00:00",
+            "last_heartbeat_at": "2026-04-13T00:00:00+00:00",
+            "lease_expires_at": "2026-04-13T00:00:01+00:00",
+            "owner_pid": 999999,
+            "owner_token": "secret-token",
+        }
+    )
+    before = json.dumps(load_autonomous_runtime(), sort_keys=True)
+    runner = CliRunner()
+
+    result = runner.invoke(cli, ["workflow", "autonomous-status", "--run-id", "run-1", "--json"])
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["data"]["status"] == "stale"
+    assert json.dumps(load_autonomous_runtime(), sort_keys=True) == before
+    assert load_autonomous_runtime_history("run-1") == {}
+    assert list_autonomous_runtime_events("run-1") == []
+
+
+def test_autonomous_worker_argv_uses_auth_file_not_owner_token() -> None:
+    argv = main_module._autonomous_worker_argv("run-1", "C:\\temp\\worker-auth.json")
+
+    assert "--auth-file" in argv
+    assert "C:\\temp\\worker-auth.json" in argv
+    assert "--owner-token" not in argv
+
+
+def test_autonomous_stop_json_requires_owner_token(monkeypatch, tmp_path):
+    if _workflow_command("autonomous-stop") is None:
+        pytest.skip("Lane 2 autonomous-stop command is not available in this checkout yet.")
+
+    monkeypatch.chdir(tmp_path)
+    save_autonomous_runtime(
+        {
+            "schema_version": "1.0",
+            "run_id": "run-1",
+            "status": "running",
+            "goal": "proof",
+            "profile_name": "goal-chaser",
+            "iteration": 1,
+            "updated_at": "2026-04-13T00:00:00+00:00",
+            "started_at": "2026-04-13T00:00:00+00:00",
+            "owner_token": "secret-token",
+        }
+    )
+    runner = CliRunner()
+
+    result = runner.invoke(cli, ["workflow", "autonomous-stop", "--run-id", "run-1", "--json"])
+
+    assert result.exit_code != 0
+    assert "owner_token is required" in result.output
 
 
 

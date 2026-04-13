@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import threading
 from pathlib import Path
 
@@ -18,9 +19,11 @@ from research_copilot.research_state import (
     get_research_root,
     load_onboarding_contract,
     load_recent_workspaces,
+    process_is_running,
     remember_workspace,
     save_record,
     save_onboarding_contract,
+    autonomous_runtime_is_stale,
 )
 
 
@@ -222,6 +225,20 @@ def test_workspace_metadata_uses_workspace_dir_not_internal_state_root(monkeypat
     workspace_metadata = json.loads((tmp_path / ".research-copilot" / "workspace.json").read_text())
 
     assert workspace_metadata["workspace_root"] == str(tmp_path)
+
+
+def test_process_is_running_reports_current_process_alive() -> None:
+    assert process_is_running(os.getpid()) is True
+
+
+def test_autonomous_runtime_is_stale_ignores_live_owner_with_future_lease() -> None:
+    payload = {
+        "status": "running",
+        "owner_pid": os.getpid(),
+        "lease_expires_at": "2999-01-01T00:00:00+00:00",
+    }
+
+    assert autonomous_runtime_is_stale(payload) is False
 
 
 def test_recent_workspace_registry_tracks_workspace_dirs_even_for_new_root(

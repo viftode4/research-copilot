@@ -2,8 +2,15 @@
 
 from __future__ import annotations
 
+import importlib
+import inspect
 import json
+import os
+from pathlib import Path
+import subprocess
+import sys
 from typing import Any
+from uuid import uuid4
 
 from research_copilot.integrations.mcp.schemas import (
     McpToolDefinition,
@@ -34,6 +41,13 @@ from research_copilot.services.workflows import (
     triage as triage_workflow,
 )
 
+AUTONOMOUS_RUNTIME_MODULE = "research_copilot.services.autonomous_runtime"
+_AUTONOMOUS_START_CANDIDATES = ("autonomous_run",)
+_AUTONOMOUS_STATUS_CANDIDATES = ("autonomous_status",)
+_AUTONOMOUS_STOP_CANDIDATES = ("autonomous_stop",)
+_AUTONOMOUS_RESUME_CANDIDATES = ("autonomous_resume",)
+_AUTONOMOUS_WORKER_CANDIDATES = ("run_autonomous_worker", "autonomous_worker")
+
 
 class ToolArgumentError(ValueError):
     """Raised when MCP tool arguments fail lightweight validation."""
@@ -59,6 +73,22 @@ def _normalize_jsonish(value: Any, *, field_name: str) -> str:
     if isinstance(value, (dict, list)):
         return json.dumps(value)
     raise ToolArgumentError(f"'{field_name}' must be an object, array, or JSON string.")
+
+
+def _normalize_objectish(value: Any, *, field_name: str) -> dict[str, Any]:
+    if value in (None, ""):
+        return {}
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str):
+        try:
+            decoded = json.loads(value)
+        except json.JSONDecodeError as exc:
+            raise ToolArgumentError(f"'{field_name}' must be a JSON object or object-encoded string.") from exc
+        if isinstance(decoded, dict):
+            return decoded
+        raise ToolArgumentError(f"'{field_name}' must decode to a JSON object.")
+    raise ToolArgumentError(f"'{field_name}' must be a JSON object or object-encoded string.")
 
 
 def _type_matches(expected_type: str, value: Any) -> bool:
@@ -110,6 +140,151 @@ def validate_tool_arguments(schema: dict[str, Any], arguments: dict[str, Any]) -
             raise ToolArgumentError(f"'{field_name}' must be one of: {', '.join(enum)}.")
 
     return arguments
+
+
+def _load_autonomous_runtime_callable(*candidate_names: str) -> Any:
+    try:
+        module = importlib.import_module(AUTONOMOUS_RUNTIME_MODULE)
+    except ModuleNotFoundError as exc:
+        raise ValueError("Autonomous runtime services are not available in this build.") from exc
+
+    for name in candidate_names:
+        candidate = getattr(module, name, None)
+        if callable(candidate):
+            return candidate
+
+    raise ValueError(
+        "Autonomous runtime services are missing an expected lifecycle entrypoint: "
+        + ", ".join(candidate_names)
+    )
+
+
+def _autonomous_status_unavailable_payload(run_id: str = "") -> dict[str, Any]:
+    return {
+        "run_id": run_id,
+        "status": "unavailable",
+        "available": False,
+        "summary": "Autonomous runtime services are not available in this build.",
+    }
+
+
+def _invoke_autonomous_runtime(*candidate_names: str, **kwargs: Any) -> Any:
+    handler = _load_autonomous_runtime_callable(*candidate_names)
+    signature = inspect.signature(handler)
+    if any(parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in signature.parameters.values()):
+        bound_kwargs = kwargs
+    else:
+        bound_kwargs = {key: value for key, value in kwargs.items() if key in signature.parameters}
+    return handler(**bound_kwargs)
+
+
+def _runtime_payload_view(payload: Any) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        return {}
+    runtime = payload.get("runtime")
+    return runtime if isinstance(runtime, dict) else payload
+
+
+def _runtime_value(payload: Any, key: str) -> Any:
+    if not isinstance(payload, dict):
+        return None
+    if key in payload:
+        return payload.get(key)
+    runtime = payload.get("runtime")
+    if isinstance(runtime, dict):
+        return runtime.get(key)
+    return None
+
+
+def _autonomous_worker_auth_dir() -> Path:
+    path = resolve_workspace().canonical_root / "runtime" / "auth"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _create_autonomous_worker_auth_file(run_id: str, owner_token: str) -> Path:
+    auth_path = _autonomous_worker_auth_dir() / f"{run_id}-{uuid4().hex}.json"
+    payload = {
+        "run_id": run_id,
+        "owner_token": owner_token,
+        "owner_instance_id": uuid4().hex,
+    }
+    auth_path.write_text(json.dumps(payload), encoding="utf-8")
+    try:
+        os.chmod(auth_path, 0o600)
+    except OSError:
+        pass
+    return auth_path
+
+
+def _autonomous_worker_argv(run_id: str, auth_file: str) -> list[str]:
+    workspace = str(resolve_workspace().workspace_dir)
+    return [
+        sys.executable,
+        "-m",
+        "research_copilot.main",
+        "--workspace",
+        workspace,
+        "workflow",
+        "autonomous-worker",
+        "--run-id",
+        run_id,
+        "--auth-file",
+        auth_file,
+    ]
+
+
+def _autonomous_worker_env() -> dict[str, str]:
+    workspace = str(resolve_workspace().workspace_dir)
+    env = os.environ.copy()
+    env["RC_WORKING_DIR"] = workspace
+    src_root = str(Path(__file__).resolve().parents[3])
+    existing_pythonpath = env.get("PYTHONPATH", "")
+    paths = [path for path in existing_pythonpath.split(os.pathsep) if path]
+    if src_root not in paths:
+        env["PYTHONPATH"] = os.pathsep.join([src_root, *paths]) if paths else src_root
+    return env
+
+
+def _should_launch_autonomous_worker(payload: Any) -> bool:
+    runtime = _runtime_payload_view(payload)
+    if not runtime:
+        return False
+    if runtime.get("worker_spawned") or runtime.get("worker_started"):
+        return False
+    if runtime.get("owner_pid"):
+        return False
+    return bool(_runtime_value(payload, "run_id") and _runtime_value(payload, "owner_token"))
+
+
+def _launch_autonomous_worker(payload: Any) -> None:
+    if not _should_launch_autonomous_worker(payload):
+        return
+
+    run_id = str(_runtime_value(payload, "run_id") or "").strip()
+    owner_token = str(_runtime_value(payload, "owner_token") or "").strip()
+    if not run_id or not owner_token:
+        raise ValueError("Autonomous runtime start did not return a run_id/owner_token pair.")
+    auth_file = _create_autonomous_worker_auth_file(run_id, owner_token)
+
+    popen_kwargs: dict[str, Any] = {
+        "args": _autonomous_worker_argv(run_id, str(auth_file)),
+        "cwd": str(resolve_workspace().workspace_dir),
+        "env": _autonomous_worker_env(),
+        "stdin": subprocess.DEVNULL,
+        "stdout": subprocess.DEVNULL,
+        "stderr": subprocess.DEVNULL,
+        "close_fds": True,
+    }
+    if os.name == "nt":
+        creationflags = 0
+        for flag_name in ("CREATE_NEW_PROCESS_GROUP", "DETACHED_PROCESS", "CREATE_NO_WINDOW"):
+            creationflags |= int(getattr(subprocess, flag_name, 0))
+        if creationflags:
+            popen_kwargs["creationflags"] = creationflags
+    else:
+        popen_kwargs["start_new_session"] = True
+    subprocess.Popen(**popen_kwargs)
 
 
 async def rc_status(arguments: dict[str, Any]) -> dict[str, Any]:
@@ -198,6 +373,88 @@ async def rc_set_context(arguments: dict[str, Any]) -> dict[str, Any]:
         linked_experiment_id=str(arguments.get("linked_experiment_id", "")),
         linked_job_id=str(arguments.get("linked_job_id", "")),
     )
+
+
+async def rc_autonomous_run(arguments: dict[str, Any]) -> dict[str, Any]:
+    result = _invoke_autonomous_runtime(
+        *_AUTONOMOUS_START_CANDIDATES,
+        goal=str(arguments.get("goal", "")),
+        success_criteria=str(arguments.get("success_criteria", "")),
+        profile_name=str(arguments.get("profile_name", "")),
+        active_profile=str(arguments.get("profile_name", "")),
+        autonomy_level=str(arguments.get("autonomy_level", "")),
+        allowed_actions=_normalize_list(arguments.get("allowed_actions"), field_name="allowed_actions"),
+        constraints=_normalize_list(arguments.get("constraints"), field_name="constraints"),
+        stop_conditions=_normalize_list(arguments.get("stop_conditions"), field_name="stop_conditions"),
+        command_template=str(arguments.get("command_template", "")),
+        template_vars=_normalize_objectish(arguments.get("template_vars"), field_name="template_vars"),
+        action_envelope=_normalize_objectish(
+            arguments.get("action_envelope"), field_name="action_envelope"
+        ),
+        max_iterations=arguments.get("max_iterations"),
+        created_by=str(arguments.get("created_by", "codex-mcp")),
+        actor_type=str(arguments.get("actor_type", "codex")),
+        actor=str(arguments.get("actor_type", "codex")),
+        spawn_worker=False,
+        launch_worker=False,
+        detach=False,
+    )
+    if inspect.isawaitable(result):
+        payload = await result
+    else:
+        payload = result
+    _launch_autonomous_worker(payload)
+    return payload
+
+
+async def rc_autonomous_status(arguments: dict[str, Any]) -> dict[str, Any]:
+    run_id = str(arguments.get("run_id", ""))
+    try:
+        result = _invoke_autonomous_runtime(
+            *_AUTONOMOUS_STATUS_CANDIDATES,
+            run_id=run_id,
+            runtime_id=run_id,
+        )
+    except ValueError as exc:
+        if "Autonomous runtime services are not available" not in str(exc):
+            raise
+        return _autonomous_status_unavailable_payload(run_id)
+    return await result if inspect.isawaitable(result) else result
+
+
+async def rc_autonomous_stop(arguments: dict[str, Any]) -> dict[str, Any]:
+    result = _invoke_autonomous_runtime(
+        *_AUTONOMOUS_STOP_CANDIDATES,
+        run_id=str(arguments.get("run_id", "")),
+        runtime_id=str(arguments.get("run_id", "")),
+        reason=str(arguments.get("reason", "")),
+        stop_reason=str(arguments.get("reason", "")),
+        owner_token=str(arguments.get("owner_token", "")),
+        token=str(arguments.get("owner_token", "")),
+        created_by=str(arguments.get("created_by", "codex-mcp")),
+        actor_type=str(arguments.get("actor_type", "codex")),
+        actor=str(arguments.get("actor_type", "codex")),
+    )
+    return await result if inspect.isawaitable(result) else result
+
+
+async def rc_autonomous_resume(arguments: dict[str, Any]) -> dict[str, Any]:
+    result = _invoke_autonomous_runtime(
+        *_AUTONOMOUS_RESUME_CANDIDATES,
+        run_id=str(arguments.get("run_id", "")),
+        runtime_id=str(arguments.get("run_id", "")),
+        owner_token=str(arguments.get("owner_token", "")),
+        token=str(arguments.get("owner_token", "")),
+        created_by=str(arguments.get("created_by", "codex-mcp")),
+        actor_type=str(arguments.get("actor_type", "codex")),
+        actor=str(arguments.get("actor_type", "codex")),
+        spawn_worker=False,
+        launch_worker=False,
+        detach=False,
+    )
+    payload = await result if inspect.isawaitable(result) else result
+    _launch_autonomous_worker(payload)
+    return payload
 
 
 TOOL_DEFINITIONS: tuple[McpToolDefinition, ...] = (
@@ -364,6 +621,94 @@ TOOL_DEFINITIONS: tuple[McpToolDefinition, ...] = (
             required=["key", "value"],
         ),
         handler=rc_set_context,
+    ),
+    McpToolDefinition(
+        name="rc_autonomous_run",
+        description=(
+            "Start the persistent autonomous runtime. "
+            "Side effects: writes runtime lifecycle state, mints ownership, and launches the detached worker. "
+            "Repeat safety: not idempotent; repeated calls can replace the active runtime."
+        ),
+        input_schema=object_schema(
+            {
+                "goal": string_field("Optional goal override for the persistent runtime."),
+                "success_criteria": string_field("Optional success-criteria override."),
+                "profile_name": string_field("Optional autonomous profile override."),
+                "autonomy_level": string_field(
+                    "Optional autonomy-level override.",
+                    enum=["guided", "bounded", "aggressive"],
+                ),
+                "allowed_actions": array_field("Repeatable allowed actions."),
+                "constraints": array_field("Explicit constraints to preserve."),
+                "stop_conditions": array_field("Conditions that should stop execution."),
+                "command_template": string_field(
+                    "Reusable local command template for persistent run-experiment steps."
+                ),
+                "template_vars": object_or_string_field(
+                    "Persisted template variables as a JSON object or object-encoded JSON string."
+                ),
+                "action_envelope": object_or_string_field(
+                    "Optional normalized action-envelope override as a JSON object or object-encoded JSON string."
+                ),
+                "max_iterations": integer_field(
+                    "Optional maximum number of bounded runtime iterations.",
+                    minimum=1,
+                ),
+                "created_by": string_field("Actor identifier for provenance.", default="codex-mcp"),
+                "actor_type": string_field("Actor type recorded in provenance.", default="codex"),
+            }
+        ),
+        handler=rc_autonomous_run,
+    ),
+    McpToolDefinition(
+        name="rc_autonomous_status",
+        description=(
+            "Inspect the persisted autonomous runtime state. "
+            "Read-only; no side effects. Returns the active runtime when no run id is provided."
+        ),
+        input_schema=object_schema(
+            {
+                "run_id": string_field("Optional runtime identifier; defaults to the active runtime."),
+            }
+        ),
+        handler=rc_autonomous_status,
+    ),
+    McpToolDefinition(
+        name="rc_autonomous_stop",
+        description=(
+            "Request a graceful stop for the persistent autonomous runtime. "
+            "Side effects: marks stop-request metadata; the worker exits after the current bounded action."
+        ),
+        input_schema=object_schema(
+            {
+                "run_id": string_field("Optional runtime identifier; defaults to the active runtime."),
+                "reason": string_field("Optional operator stop reason."),
+                "owner_token": string_field("Required runtime capability token for stop."),
+                "created_by": string_field("Actor identifier for provenance.", default="codex-mcp"),
+                "actor_type": string_field("Actor type recorded in provenance.", default="codex"),
+            }
+            ,
+            required=["owner_token"],
+        ),
+        handler=rc_autonomous_stop,
+    ),
+    McpToolDefinition(
+        name="rc_autonomous_resume",
+        description=(
+            "Resume a stopped or stale persistent autonomous runtime. "
+            "Side effects: reacquires ownership and launches a fresh detached worker when the runtime is resumable."
+        ),
+        input_schema=object_schema(
+            {
+                "run_id": string_field("Optional runtime identifier; defaults to the active runtime."),
+                "owner_token": string_field("Required runtime capability token for resume."),
+                "created_by": string_field("Actor identifier for provenance.", default="codex-mcp"),
+                "actor_type": string_field("Actor type recorded in provenance.", default="codex"),
+            }
+            ,
+            required=["owner_token"],
+        ),
+        handler=rc_autonomous_resume,
     ),
 )
 

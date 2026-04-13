@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+
+import pytest
 from rich.console import Console
 
 from research_copilot.tui.app import ResearchCopilotTUI
@@ -127,6 +130,13 @@ def _seeded_snapshot() -> DashboardSnapshot:
         snapshot_owner="workflow_snapshot_service",
         snapshot_state="complete",
     )
+
+
+def _runtime_field_name() -> str | None:
+    for candidate in ("runtime", "runtime_status", "autonomous_runtime"):
+        if candidate in DashboardSnapshot.__dataclass_fields__:
+            return candidate
+    return None
 
 
 def _render_text(renderable) -> str:
@@ -453,3 +463,31 @@ def test_toggle_auto_refresh_shortcut():
     assert app.auto_refresh_enabled is False
     app.handle_command("a")
     assert app.auto_refresh_enabled is True
+
+
+def test_overview_renders_runtime_panel_when_runtime_lane_is_available():
+    runtime_field = _runtime_field_name()
+    if runtime_field is None:
+        pytest.skip("Lane 3 runtime snapshot field is not available in this checkout yet.")
+    if not any("runtime" in name for name in dir(ResearchCopilotTUI)):
+        pytest.skip("Lane 3 runtime render hooks are not available in this checkout yet.")
+
+    snapshot = _seeded_snapshot()
+    snapshot = replace(
+        snapshot,
+        **{
+            runtime_field: {
+                "status": "running",
+                "iteration": 2,
+                "last_action": "review-results",
+                "last_heartbeat_at": "2026-04-13T01:05:00+00:00",
+            }
+        },
+    )
+    app = ResearchCopilotTUI(snapshot_loader=lambda: snapshot)
+
+    rendered = _render_text(app.render())
+
+    assert "Runtime" in rendered
+    assert "running" in rendered.lower()
+    assert "review-results" in rendered
