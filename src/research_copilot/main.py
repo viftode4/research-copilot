@@ -164,7 +164,7 @@ def _emit_bootstrap_screen(workspace: str) -> None:
     click.echo(f"Workspace:    {workspace}")
     click.echo("State:        Not initialized")
     click.echo()
-    click.echo("Next steps:")
+    click.echo("Recommended next actions:")
     click.echo("  1. research-copilot init")
     if last_workspace and last_workspace != workspace:
         click.echo(f'  2. research-copilot --workspace "{last_workspace}"')
@@ -183,7 +183,7 @@ def _emit_legacy_workspace_screen() -> None:
     click.echo(f"Legacy root:  {resolved.legacy_root}")
     click.echo("State:        Legacy compatibility workspace detected")
     click.echo()
-    click.echo("Next steps:")
+    click.echo("Recommended next actions:")
     click.echo("  1. research-copilot migrate")
     click.echo("  2. research-copilot status")
     click.echo("  3. research-copilot workflow triage --json")
@@ -350,16 +350,16 @@ def status(as_json: bool):
         click.echo("  State:            Configured")
         click.echo(f"  Goal:             {onboarding.get('goal', 'Unknown')}")
         click.echo(f"  Active profile:   {onboarding.get('active_profile', 'Unknown')}")
-        click.echo("  Next step:        research-copilot workflow triage")
+        click.echo("  Recommended next action: research-copilot workflow triage")
     else:
         click.echo("  State:            Not configured")
         if workspace_mode == "legacy":
             next_step = "research-copilot migrate"
         else:
             next_step = "research-copilot workflow onboard" if initialized else "research-copilot init"
-        click.echo(f"  Next step:        {next_step}")
+        click.echo(f"  Recommended next action: {next_step}")
     click.echo()
-    click.echo("Run 'research-copilot' or 'research-copilot tui' to open the terminal dashboard.")
+    click.echo("Open 'research-copilot' for the read-only TUI; use workflow commands for actions.")
 
 
 def _run_async(coro: Any) -> Any:
@@ -735,7 +735,7 @@ def mcp_print_agents_snippet():
 
 @cli.group()
 def runtime():
-    """Inspect and steer the Codex-managed runtime."""
+    """Advanced runtime supervision for Codex-managed sessions."""
 
 
 @runtime.command("codex-attach")
@@ -1459,17 +1459,17 @@ def papers_list(limit: int, as_json: bool):
 
 @cli.group(epilog=WORKFLOW_EPILOG.strip())
 def workflow():
-    """Run named research workflow commands for the solo research loop."""
+    """Primary action surface for the solo research loop."""
 
 
 @workflow.command()
 @click.option("--limit", default=5, show_default=True, type=click.IntRange(1, 20))
 @click.option("--json", "as_json", is_flag=True, help="Emit machine-readable JSON.")
 def triage(limit: int, as_json: bool):
-    """Inspect current lab state and suggest the next workflow."""
+    """Inspect current lab state and recommend the next workflow action."""
     payload = _run_command(triage_workflow(max_items=limit))
     summary = (
-        f"Suggested next action: {payload['suggested_next_action']}\n"
+        f"Recommended next action: {payload['suggested_next_action']}\n"
         f"Blockers: {'; '.join(payload['blockers'])}"
     )
     _emit_result(payload, as_json, summary)
@@ -1504,7 +1504,7 @@ def launch_experiment(
     time_limit: str,
     as_json: bool,
 ):
-    """Register an experiment and launch its job."""
+    """Register an experiment and submit a tracked job."""
     _guard_machine_mutation(as_json)
     payload = _run_command(
         launch_experiment_workflow(
@@ -1657,7 +1657,7 @@ def workflow_run_experiment(
     actor_type: str,
     as_json: bool,
 ):
-    """Execute a real local experiment command and persist a run artifact."""
+    """Execute a bounded local command and persist its run artifact."""
     _guard_machine_mutation(as_json)
     payload = _run_command(
         run_experiment_workflow(
@@ -1764,7 +1764,7 @@ def workflow_autonomous_run(
     actor_type: str,
     as_json: bool,
 ):
-    """Start the persistent autonomous runtime and detach its worker."""
+    """Start the canonical autonomous workflow runtime and detach its worker."""
     _guard_machine_mutation(as_json)
     payload = _invoke_autonomous_runtime(
         *_AUTONOMOUS_START_CANDIDATES,
@@ -1801,7 +1801,7 @@ def workflow_autonomous_run(
 @click.option("--run-id", default="", help="Optional runtime id; defaults to the active runtime.")
 @click.option("--json", "as_json", is_flag=True, help="Emit machine-readable JSON.")
 def workflow_autonomous_status(run_id: str, as_json: bool):
-    """Inspect persisted autonomous runtime state without mutating it."""
+    """Inspect canonical autonomous workflow state without mutating it."""
     try:
         payload = _invoke_autonomous_runtime(
             *_AUTONOMOUS_STATUS_CANDIDATES,
@@ -1836,7 +1836,7 @@ def workflow_autonomous_stop(
     actor_type: str,
     as_json: bool,
 ):
-    """Request a graceful stop for the persistent autonomous runtime."""
+    """Request a graceful stop for the canonical autonomous workflow runtime."""
     _guard_machine_mutation(as_json)
     payload = _invoke_autonomous_runtime(
         *_AUTONOMOUS_STOP_CANDIDATES,
@@ -1872,7 +1872,7 @@ def workflow_autonomous_resume(
     actor_type: str,
     as_json: bool,
 ):
-    """Resume a stopped or stale persistent autonomous runtime."""
+    """Resume a stopped or stale canonical autonomous workflow runtime."""
     _guard_machine_mutation(as_json)
     payload = _invoke_autonomous_runtime(
         *_AUTONOMOUS_RESUME_CANDIDATES,
