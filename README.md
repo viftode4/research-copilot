@@ -3,9 +3,10 @@
 Research Copilot is a terminal-first local research loop.
 
 It gives you:
-- a TUI for runs, experiments, research context, and live runtime state
-- workflow commands for triage, experiments, review, and next-step planning
-- a live Codex runtime that can attach to a tmux pane, report turns, accept steering, and continue autonomously through a supervisor worker
+- a read-only TUI for observing runs, experiments, research context, and runtime state
+- workflow commands as the primary action surface for triage, experiments, review, and next-step planning
+- `workflow autonomous-*` as the canonical autonomy surface
+- `runtime codex-*` as advanced expert supervision for a live Codex pane
 
 State lives in `.research-copilot/` inside the workspace.
 
@@ -56,9 +57,33 @@ research-copilot workflow review-results <experiment-id> --json
 research-copilot workflow next-step <experiment-id> --json
 ```
 
-## Live Codex Runtime
+Recommended next action after onboarding:
 
-Attach a Codex pane as the live research brain:
+```bash
+research-copilot workflow triage --json
+```
+
+## Canonical Workflow Autonomy
+
+Start the persistent workflow autonomy loop:
+
+```bash
+research-copilot workflow autonomous-run --json
+```
+
+Inspect or control that workflow runtime:
+
+```bash
+research-copilot workflow autonomous-status --json
+research-copilot workflow autonomous-stop --owner-token <token> --json
+research-copilot workflow autonomous-resume --owner-token <token> --json
+```
+
+## Advanced Codex Runtime Supervision
+
+Use `runtime codex-*` when you already have a live Codex pane and need expert supervision/steering:
+
+Attach a Codex pane:
 
 ```bash
 research-copilot runtime codex-attach \
@@ -90,7 +115,7 @@ research-copilot runtime codex-run \
   --json
 ```
 
-Inspect live runtime state:
+Inspect live Codex runtime state:
 
 ```bash
 research-copilot runtime codex-status \
@@ -144,6 +169,7 @@ It shows:
 - goal
 - operator mode
 - pending nudges
+- a recommended next action handoff back to the workflow CLI
 
 For overflow content:
 - `j` / `k` move selection
@@ -161,6 +187,8 @@ research-copilot workflow review-results <experiment-id> --json
 research-copilot workflow next-step <experiment-id> --json
 research-copilot workflow autonomous-run --json
 ```
+
+See `docs/cli-workflows.md` for the wording contract and `docs/demo-runbook.md` for the demo path.
 
 ## Verify
 
