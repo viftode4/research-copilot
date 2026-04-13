@@ -151,6 +151,8 @@ class RuntimeRecord:
     stop_requested_at: str
     stop_reason: str
     consecutive_failures: int
+    operator_mode: str
+    pending_nudge_count: int
     freshness_label: str
     freshness_state: str
     is_stale: bool
@@ -339,10 +341,12 @@ def _build_runtime_record(snapshot: dict[str, Any]) -> RuntimeRecord | None:
         stop_requested_at=str(runtime.get("stop_requested_at") or ""),
         stop_reason=str(runtime.get("stop_reason") or ""),
         consecutive_failures=int(runtime.get("consecutive_failures") or 0),
+        operator_mode=str(runtime.get("operator_mode") or ""),
+        pending_nudge_count=int(runtime.get("pending_nudge_count") or 0),
         freshness_label=freshness_label,
         freshness_state=freshness_state,
         is_stale=freshness_state == "stale" or status == "stale",
-        is_active=status in {"running", "stopping"},
+        is_active=status in {"running", "stopping", "paused"},
     )
 
 

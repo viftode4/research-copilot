@@ -509,6 +509,8 @@ def test_runtime_card_shows_summary_separately_from_last_action():
                 "last_action": "review-results",
                 "summary": "First monitored Codex turn.",
                 "goal": "Live monitor validation",
+                "operator_mode": "steerable",
+                "pending_nudge_count": 2,
                 "last_heartbeat_at": "2026-04-13T01:05:00+00:00",
             }
         },
@@ -520,3 +522,5 @@ def test_runtime_card_shows_summary_separately_from_last_action():
     assert "Last action: review-results" in rendered
     assert "Summary: First monitored Codex turn." in rendered
     assert "Goal: Live monitor validation" in rendered
+    assert "Pending nudges: 2" in rendered
+    assert "Operator: steerable" in rendered

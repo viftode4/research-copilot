@@ -884,6 +884,12 @@ class ResearchCopilotTUI:
                 compact_lines.append(
                     Text(f"Summary: {self._truncate_inline(summary_line, limit=72)}")
                 )
+            compact_lines.append(
+                Text(
+                    f"Operator: {runtime.operator_mode or '—'} • Pending nudges: {runtime.pending_nudge_count}",
+                    style="dim",
+                )
+            )
             if runtime.goal:
                 compact_lines.append(
                     Text(f"Goal: {self._truncate_inline(runtime.goal, limit=72)}", style="dim")
@@ -903,6 +909,8 @@ class ResearchCopilotTUI:
         info.add_row("Iteration", iteration_value)
         info.add_row("Profile", runtime.profile_name or "—")
         info.add_row("Autonomy", runtime.autonomy_level or "—")
+        info.add_row("Operator", runtime.operator_mode or "—")
+        info.add_row("Pending nudges", str(runtime.pending_nudge_count))
         info.add_row("Heartbeat", format_timestamp(runtime.last_heartbeat_at))
         info.add_row("Updated", format_timestamp(runtime.updated_at))
         info.add_row("Last action", self._truncate_inline(last_action, limit=48))
@@ -1258,10 +1266,12 @@ class ResearchCopilotTUI:
             stop_requested_at=str(runtime.get("stop_requested_at") or ""),
             stop_reason=str(runtime.get("stop_reason") or ""),
             consecutive_failures=int(runtime.get("consecutive_failures") or 0),
+            operator_mode=str(runtime.get("operator_mode") or ""),
+            pending_nudge_count=int(runtime.get("pending_nudge_count") or 0),
             freshness_label=freshness_label,
             freshness_state=freshness_state,
             is_stale=bool(runtime.get("is_stale")) or status == "stale",
-            is_active=bool(runtime.get("is_active")) or status in {"running", "stopping"},
+            is_active=bool(runtime.get("is_active")) or status in {"running", "stopping", "paused"},
         )
 
     def _runtime_header_summary(self) -> str:
