@@ -150,14 +150,19 @@ def _nudge_count(session_id: str) -> int:
 
 
 def _run_tmux_command(*args: str) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        ["tmux", *args],
-        check=True,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-    )
+    popen_kwargs: dict[str, Any] = {
+        "args": ["tmux", *args],
+        "check": True,
+        "capture_output": True,
+        "text": True,
+        "encoding": "utf-8",
+        "errors": "replace",
+    }
+    if os.name == "nt":
+        creationflags = int(getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        if creationflags:
+            popen_kwargs["creationflags"] = creationflags
+    return subprocess.run(**popen_kwargs)
 
 
 def _tmux_pane_exists(pane_id: str) -> bool:
