@@ -865,6 +865,7 @@ class ResearchCopilotTUI:
         )
         freshness = Text(f"Freshness: {runtime.freshness_label}", style=self._freshness_style(runtime))
         last_action = runtime.last_action or runtime.summary or "No bounded action recorded yet."
+        summary_line = runtime.summary.strip()
         stop_note = runtime.stop_reason or (
             "Graceful stop requested." if runtime.stop_requested_at and runtime.status == "stopping" else ""
         )
@@ -879,6 +880,14 @@ class ResearchCopilotTUI:
                 ),
                 Text(f"Last action: {self._truncate_inline(last_action, limit=72)}"),
             ]
+            if summary_line and summary_line != last_action:
+                compact_lines.append(
+                    Text(f"Summary: {self._truncate_inline(summary_line, limit=72)}")
+                )
+            if runtime.goal:
+                compact_lines.append(
+                    Text(f"Goal: {self._truncate_inline(runtime.goal, limit=72)}", style="dim")
+                )
             if stop_note:
                 compact_lines.append(
                     Text(f"Stop: {self._truncate_inline(stop_note, limit=72)}", style="bold red")

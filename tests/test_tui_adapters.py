@@ -19,6 +19,7 @@ from research_copilot.mcp_servers.slurm import (
     handle_check_job_status,
     handle_submit_job,
 )
+from research_copilot.services.codex_runtime import attach_codex_session
 from research_copilot.services.research_ops import ResearchOpsService
 from research_copilot.services.workflow_snapshot import (
     build_canonical_snapshot,
@@ -77,6 +78,22 @@ class TestWorkflowSnapshot:
             }.issubset(action)
             for action in snapshot["actions"]
         )
+
+    def test_canonical_snapshot_uses_codex_active_session_when_present(self, monkeypatch, tmp_path):
+        monkeypatch.chdir(tmp_path)
+        attach_codex_session(
+            session_id="codex-1",
+            goal="Monitor Codex runtime in the dashboard",
+            pane_id="%91",
+            window_name="brain",
+            session_name="codex-1",
+        )
+
+        snapshot = build_canonical_snapshot()
+
+        assert snapshot["runtime"]["source"] == "codex"
+        assert snapshot["runtime"]["session_id"] == "codex-1"
+        assert snapshot["runtime"]["goal"] == "Monitor Codex runtime in the dashboard"
 
     @pytest.mark.asyncio
     async def test_snapshot_links_jobs_experiments_and_knowledge(self):

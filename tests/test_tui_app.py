@@ -491,3 +491,32 @@ def test_overview_renders_runtime_panel_when_runtime_lane_is_available():
     assert "Runtime" in rendered
     assert "running" in rendered.lower()
     assert "review-results" in rendered
+
+
+def test_runtime_card_shows_summary_separately_from_last_action():
+    runtime_field = _runtime_field_name()
+    if runtime_field is None:
+        pytest.skip("Runtime snapshot field is not available in this checkout yet.")
+
+    snapshot = _seeded_snapshot()
+    snapshot = replace(
+        snapshot,
+        **{
+            runtime_field: {
+                "status": "running",
+                "iteration": 2,
+                "current_phase": "thinking",
+                "last_action": "review-results",
+                "summary": "First monitored Codex turn.",
+                "goal": "Live monitor validation",
+                "last_heartbeat_at": "2026-04-13T01:05:00+00:00",
+            }
+        },
+    )
+    app = ResearchCopilotTUI(snapshot_loader=lambda: snapshot)
+
+    rendered = _render_text(app.render())
+
+    assert "Last action: review-results" in rendered
+    assert "Summary: First monitored Codex turn." in rendered
+    assert "Goal: Live monitor validation" in rendered
