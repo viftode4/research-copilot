@@ -749,12 +749,18 @@ class ResearchCopilotTUI:
         info.add_row("Submitted", format_timestamp(job.submitted_at))
         info.add_row("Started", format_timestamp(job.started_at or ""))
         info.add_row("Completed", format_timestamp(job.completed_at or ""))
+        recommended_command, recommended_note = self._job_recommended_action(job)
         return self._scroll_panel_content(Group(
             info,
             Text("\nLog summary", style="bold"),
             Text(job.log_tail, style="white"),
             Text("\nStderr summary", style="bold"),
             Text(job.error_tail or "(no stderr)", style="dim"),
+            Text(""),
+            self._render_recommended_action(
+                recommended_command,
+                note=recommended_note,
+            ),
         ), "run_detail")
 
     def _render_experiment_detail(self, experiment: ExperimentRecord | None) -> RenderableType:
@@ -773,12 +779,18 @@ class ResearchCopilotTUI:
         info.add_row("Updated", format_timestamp(experiment.updated_at))
         info.add_row("W&B run", experiment.wandb_run_id or "—")
         info.add_row("Linked job", experiment.slurm_job_id or "—")
+        recommended_command, recommended_note = self._experiment_recommended_action(experiment)
         return self._scroll_panel_content(Group(
             info,
             Text("\nHypothesis / notes", style="bold"),
             Text(experiment.hypothesis or experiment.description or "No experiment notes yet."),
             Text("\nResult snapshot", style="bold"),
             Text(experiment.results_summary),
+            Text(""),
+            self._render_recommended_action(
+                recommended_command,
+                note=recommended_note,
+            ),
         ), "experiment_detail")
 
     def _render_insights_table(self, limit: int | None = None) -> RenderableType:
@@ -867,10 +879,22 @@ class ResearchCopilotTUI:
 
     def _render_runtime_card(self, *, compact: bool) -> RenderableType:
         runtime = self._runtime_record()
+        recommended_command, recommended_note = self._runtime_recommended_action(runtime)
         if runtime is None:
-            return Text(
-                "No live runtime detected. Attach a Codex session with runtime codex-attach or start workflow autonomous-run.",
-                style="dim",
+            return Group(
+                Text(
+                    "No live runtime detected. Start workflow autonomous-run for the canonical autonomy path.",
+                    style="dim",
+                ),
+                Text(
+                    "Advanced expert supervision remains available through runtime codex-attach.",
+                    style="dim",
+                ),
+                Text(""),
+                self._render_recommended_action(
+                    recommended_command,
+                    note=recommended_note,
+                ),
             )
 
         iteration_value = (
@@ -919,6 +943,13 @@ class ResearchCopilotTUI:
                 compact_lines.append(
                     Text(f"Stop: {self._truncate_inline(stop_note, limit=72)}", style="bold red")
                 )
+            compact_lines.append(Text("Recommended next action", style="bold cyan"))
+            compact_lines.append(
+                Text(self._truncate_inline(recommended_command, limit=72), style="cyan")
+            )
+            compact_lines.append(
+                Text(self._truncate_inline(recommended_note, limit=72), style="dim")
+            )
             return self._scroll_panel_content(Group(*compact_lines), "runtime_card")
 
         info = Table.grid(expand=True)
@@ -959,6 +990,15 @@ class ResearchCopilotTUI:
             details.extend([Text("\nWorkspace", style="bold"), Text(runtime.workspace, style="dim")])
         if stop_note:
             details.extend([Text("\nStop reason", style="bold red"), Text(stop_note, style="red")])
+        details.extend(
+            [
+                Text(""),
+                self._render_recommended_action(
+                    recommended_command,
+                    note=recommended_note,
+                ),
+            ]
+        )
         return self._scroll_panel_content(Group(*details), "runtime_card")
 
     def _render_selected_research_detail(self) -> RenderableType:
@@ -1091,11 +1131,13 @@ class ResearchCopilotTUI:
 
     def _render_getting_started(self) -> RenderableType:
         return Group(
-            Text("Use the solo workflow commands to seed the dashboard:", style="bold"),
-            Text("  1. research-copilot workflow onboard"),
-            Text("  2. research-copilot workflow triage --json"),
-            Text('  3. research-copilot workflow run-experiment --command "python ..." --json'),
-            Text("  4. research-copilot workflow review-results <experiment-id> --json"),
+            Text("Recommended next action", style="bold cyan"),
+            Text("  research-copilot workflow onboard --json", style="cyan"),
+            Text(""),
+            Text("Then seed the read-only dashboard from the workflow CLI:", style="bold"),
+            Text("  1. research-copilot workflow triage --json"),
+            Text('  2. research-copilot workflow run-experiment --command "python ..." --json'),
+            Text("  3. research-copilot workflow review-results <experiment-id> --json"),
             Text("Proof script: docs/seeded-solo-cli-scenario.md", style="dim"),
         )
 
@@ -1331,10 +1373,78 @@ class ResearchCopilotTUI:
         if runtime is None:
             return "Live Runtime"
         if runtime.source == "codex":
-            return "Live Codex Runtime"
+            return "Advanced Codex Runtime"
         if runtime.source == "autonomous":
             return "Autonomous Runtime"
         return "Live Runtime"
+
+    def _render_recommended_action(self, command: str, *, note: str = "") -> RenderableType:
+        lines: list[RenderableType] = [
+            Text("Recommended next action", style="bold cyan"),
+            Text(command, style="cyan"),
+        ]
+        if note:
+            lines.append(Text(note, style="dim"))
+        return Group(*lines)
+
+    def _job_recommended_action(self, job: JobRecord | None) -> tuple[str, str]:
+        if job is None:
+            return ("research-copilot workflow triage --json", "Use the workflow CLI to choose the next safe action.")
+        status = job.status.lower()
+        if status in {"running", "pending", "planned", "queued", "stopping"}:
+            return (
+                f"research-copilot workflow monitor-run {job.job_id} --kind job --json",
+                "The TUI stays read-only; use workflow monitor-run for the latest logs and state.",
+            )
+        linked_experiment = _first_link_of_type(self.snapshot.links_by_entity.get(job.entity_id, ()), "experiment")
+        if linked_experiment is not None:
+            experiment_id = linked_experiment.entity_id.removeprefix("experiment:")
+            return (
+                f"research-copilot workflow review-results {experiment_id} --json",
+                "Review the linked experiment from the workflow CLI before deciding the next run.",
+            )
+        return (
+            "research-copilot workflow triage --json",
+            "Use triage when a completed run has no linked experiment review path yet.",
+        )
+
+    def _experiment_recommended_action(self, experiment: ExperimentRecord | None) -> tuple[str, str]:
+        if experiment is None:
+            return ("research-copilot workflow triage --json", "Use the workflow CLI to choose the next safe action.")
+        status = experiment.status.lower()
+        if status in {"running", "pending", "planned", "queued", "stopping"}:
+            return (
+                f"research-copilot workflow monitor-run {experiment.experiment_id} --kind experiment --json",
+                "Use monitor-run for active tracked work; keep the TUI as the observation surface.",
+            )
+        return (
+            f"research-copilot workflow review-results {experiment.experiment_id} --json",
+            "Use review-results before next-step planning or another launch.",
+        )
+
+    def _runtime_recommended_action(self, runtime: RuntimeRecord | None) -> tuple[str, str]:
+        if runtime is None:
+            return (
+                "research-copilot workflow autonomous-run --json",
+                "workflow autonomous-* is the canonical autonomy surface; runtime codex-* is advanced expert supervision.",
+            )
+        if runtime.source == "autonomous":
+            if runtime.run_id:
+                command = f"research-copilot workflow autonomous-status --run-id {runtime.run_id} --json"
+            else:
+                command = "research-copilot workflow autonomous-status --json"
+            return (
+                command,
+                "Use workflow autonomous-* for the primary autonomy loop and status checks.",
+            )
+        if runtime.session_id:
+            command = f"research-copilot runtime codex-status --session-id {runtime.session_id} --json"
+        else:
+            command = "research-copilot runtime codex-status --json"
+        return (
+            command,
+            "runtime codex-* is an advanced expert-supervision surface for live Codex sessions.",
+        )
 
     def _runtime_border_style(self) -> str:
         runtime = self._runtime_record()
