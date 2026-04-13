@@ -352,7 +352,7 @@ class ResearchCopilotTUI:
             panels.append(
                 Panel(
                     self._render_runtime_card(compact=self._use_compact_runtime_card()),
-                    title="Autonomous Runtime",
+                    title=self._runtime_panel_title(),
                     border_style=self._runtime_border_style(),
                 )
             )
@@ -389,7 +389,7 @@ class ResearchCopilotTUI:
         )
         runtime_panel = Panel(
             self._render_runtime_card(compact=self._use_compact_runtime_card()),
-            title="Autonomous Runtime",
+            title=self._runtime_panel_title(),
             border_style=self._runtime_border_style(),
         )
 
@@ -849,7 +849,7 @@ class ResearchCopilotTUI:
         runtime = self._runtime_record()
         if runtime is None:
             return Text(
-                "No autonomous runtime detected. Start one with workflow autonomous-run.",
+                "No live runtime detected. Attach a Codex session with runtime codex-attach or start workflow autonomous-run.",
                 style="dim",
             )
 
@@ -905,6 +905,8 @@ class ResearchCopilotTUI:
         info.add_column()
         info.add_row("Status", Text(self._runtime_status_label(runtime.status), style=self._status_style(runtime.status)))
         info.add_row("Freshness", Text(runtime.freshness_label, style=self._freshness_style(runtime)))
+        info.add_row("Source", runtime.source or "—")
+        info.add_row("Session", runtime.run_id or "—")
         info.add_row("Phase", runtime.current_phase or "—")
         info.add_row("Iteration", iteration_value)
         info.add_row("Profile", runtime.profile_name or "—")
@@ -1242,6 +1244,7 @@ class ResearchCopilotTUI:
         )
         freshness_state = str(runtime.get("freshness_state") or "unknown")
         return RuntimeRecord(
+            source=str(runtime.get("source") or ""),
             run_id=str(runtime.get("run_id") or ""),
             status=status,
             current_phase=str(runtime.get("current_phase") or ""),
@@ -1285,6 +1288,16 @@ class ResearchCopilotTUI:
 
     def _runtime_status_label(self, status: str) -> str:
         return status.replace("_", " ") if status else "unknown"
+
+    def _runtime_panel_title(self) -> str:
+        runtime = self._runtime_record()
+        if runtime is None:
+            return "Live Runtime"
+        if runtime.source == "codex":
+            return "Live Codex Runtime"
+        if runtime.source == "autonomous":
+            return "Autonomous Runtime"
+        return "Live Runtime"
 
     def _runtime_border_style(self) -> str:
         runtime = self._runtime_record()

@@ -135,6 +135,7 @@ class FullLogRecord:
 
 @dataclass(frozen=True)
 class RuntimeRecord:
+    source: str
     run_id: str
     status: str
     current_phase: str
@@ -332,6 +333,7 @@ def _build_runtime_record(snapshot: dict[str, Any]) -> RuntimeRecord | None:
         freshness_state = "terminal"
 
     return RuntimeRecord(
+        source=str(runtime.get("source") or ""),
         run_id=str(runtime.get("run_id") or ""),
         status=status,
         current_phase=str(runtime.get("current_phase") or ""),

@@ -477,6 +477,7 @@ def test_overview_renders_runtime_panel_when_runtime_lane_is_available():
         snapshot,
         **{
             runtime_field: {
+                "source": "codex",
                 "status": "running",
                 "iteration": 2,
                 "last_action": "review-results",
@@ -488,7 +489,7 @@ def test_overview_renders_runtime_panel_when_runtime_lane_is_available():
 
     rendered = _render_text(app.render())
 
-    assert "Runtime" in rendered
+    assert "Live Codex Runtime" in rendered
     assert "running" in rendered.lower()
     assert "review-results" in rendered
 
@@ -503,6 +504,7 @@ def test_runtime_card_shows_summary_separately_from_last_action():
         snapshot,
         **{
             runtime_field: {
+                "source": "codex",
                 "status": "running",
                 "iteration": 2,
                 "current_phase": "thinking",
@@ -524,3 +526,14 @@ def test_runtime_card_shows_summary_separately_from_last_action():
     assert "Goal: Live monitor validation" in rendered
     assert "Pending nudges: 2" in rendered
     assert "Operator: steerable" in rendered
+
+
+def test_runtime_empty_state_mentions_codex_attach_and_autonomous_run():
+    app = ResearchCopilotTUI(snapshot_loader=_seeded_snapshot)
+    app.snapshot = replace(app.snapshot, runtime=None)
+
+    rendered = _render_text(app._render_runtime_card(compact=True))
+
+    assert "No live runtime detected." in rendered
+    assert "runtime codex-attach" in rendered
+    assert "workflow autonomous-run" in rendered
