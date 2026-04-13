@@ -149,10 +149,47 @@ def _tmux_pane_exists(pane_id: str) -> bool:
     if not pane_id:
         return False
     try:
-        _run_tmux_command("display-message", "-p", "-t", pane_id, "#{pane_id}")
+        output = _run_tmux_command(
+            "list-panes",
+            "-a",
+            "-F",
+            "#{pane_id}",
+        ).stdout.splitlines()
     except (subprocess.CalledProcessError, FileNotFoundError):
         return False
-    return True
+    return pane_id in {line.strip() for line in output if line.strip()}
+
+
+def _tmux_pane_metadata(pane_id: str) -> dict[str, str]:
+    output = _run_tmux_command(
+        "list-panes",
+        "-a",
+        "-F",
+        "#{pane_id}\t#{session_name}\t#{window_name}\t#{pane_current_path}",
+    ).stdout.splitlines()
+    for line in output:
+        parts = line.split("\t")
+        if len(parts) == 4 and parts[0].strip() == pane_id:
+            return {
+                "pane_id": parts[0].strip(),
+                "session_name": parts[1].strip(),
+                "window_name": parts[2].strip(),
+                "workspace": parts[3].strip(),
+            }
+    raise ValueError(f"Unable to resolve metadata for tmux pane '{pane_id}'.")
+
+
+def _paths_compatible(expected: str, actual: str) -> bool:
+    if not expected or not actual:
+        return True
+    try:
+        expected_path = Path(expected).expanduser().resolve()
+        actual_path = Path(actual).expanduser().resolve()
+    except OSError:
+        return expected == actual
+    expected_token = str(expected_path).lower()
+    actual_token = str(actual_path).lower()
+    return actual_token.startswith(expected_token) or expected_token.startswith(actual_token)
 
 
 def _nudge_message_line(nudge: dict[str, Any]) -> str:
@@ -337,13 +374,29 @@ def attach_codex_session(
         archive_codex_active_session(archived)
 
     current = _load_session_payload(resolved_session_id)
+    resolved_window_name = _string(window_name)
+    resolved_session_name = _string(session_name)
+    resolved_workspace = _string(workspace)
+    resolved_pane_id = _string(pane_id)
+    if _string(transport) == "tmux-pane" and resolved_pane_id:
+        if not _tmux_pane_exists(resolved_pane_id):
+            raise ValueError(f"tmux pane '{resolved_pane_id}' is not available.")
+        metadata = _tmux_pane_metadata(resolved_pane_id)
+        if resolved_workspace and not _paths_compatible(resolved_workspace, metadata["workspace"]):
+            raise ValueError(
+                f"tmux pane '{resolved_pane_id}' is running in '{metadata['workspace']}', "
+                f"which does not match workspace '{resolved_workspace}'."
+            )
+        resolved_window_name = metadata["window_name"]
+        resolved_session_name = metadata["session_name"]
+        resolved_workspace = metadata["workspace"]
     transport_payload = _transport_payload(
         session_id=resolved_session_id,
         transport=transport,
-        pane_id=pane_id,
-        window_name=window_name,
-        session_name=session_name,
-        workspace=workspace,
+        pane_id=resolved_pane_id,
+        window_name=resolved_window_name,
+        session_name=resolved_session_name,
+        workspace=resolved_workspace,
     )
     payload = {
         **current,
@@ -384,10 +437,10 @@ def attach_codex_session(
         "operator_mode": _string(operator_mode) or _string(current.get("operator_mode")) or "steerable",
         "pending_nudge_count": _nudge_count(resolved_session_id),
         "transport": transport_payload,
-        "pane_id": _string(pane_id) or _string(current.get("pane_id")),
-        "window_name": _string(window_name) or _string(current.get("window_name")),
-        "session_name": _string(session_name) or _string(current.get("session_name")),
-        "workspace": _string(workspace) or _string(current.get("workspace")),
+        "pane_id": resolved_pane_id or _string(current.get("pane_id")),
+        "window_name": resolved_window_name or _string(current.get("window_name")),
+        "session_name": resolved_session_name or _string(current.get("session_name")),
+        "workspace": resolved_workspace or _string(current.get("workspace")),
         "provenance": {
             "actor": _string(actor_type) or "codex",
             "attached_at": timestamp,
@@ -693,6 +746,25 @@ def apply_codex_nudges(
         raise ValueError("Queued nudges can only be applied to tmux-pane Codex sessions.")
     if not _tmux_pane_exists(pane_id):
         raise ValueError(f"tmux pane '{pane_id}' is not available.")
+    metadata = _tmux_pane_metadata(pane_id)
+    expected_session_name = _string(current.get("session_name")) or _string(transport.get("session_name"))
+    expected_window_name = _string(current.get("window_name")) or _string(transport.get("window_name"))
+    expected_workspace = _string(current.get("workspace")) or _string(transport.get("workspace"))
+    if expected_session_name and metadata["session_name"] != expected_session_name:
+        raise ValueError(
+            f"tmux pane '{pane_id}' belongs to session '{metadata['session_name']}', "
+            f"not expected session '{expected_session_name}'."
+        )
+    if expected_window_name and metadata["window_name"] != expected_window_name:
+        raise ValueError(
+            f"tmux pane '{pane_id}' belongs to window '{metadata['window_name']}', "
+            f"not expected window '{expected_window_name}'."
+        )
+    if expected_workspace and not _paths_compatible(expected_workspace, metadata["workspace"]):
+        raise ValueError(
+            f"tmux pane '{pane_id}' is running in '{metadata['workspace']}', "
+            f"which does not match workspace '{expected_workspace}'."
+        )
 
     pending = _load_pending_nudges(resolved_session_id)
     if limit is not None:

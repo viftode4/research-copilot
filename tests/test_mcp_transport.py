@@ -292,6 +292,16 @@ async def test_tools_call_returns_structured_error_for_invalid_arguments() -> No
 async def test_codex_runtime_tools_share_service_contract(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
     monkeypatch.chdir(tmp_path)
     initialize_workspace()
+    monkeypatch.setattr("research_copilot.services.codex_runtime._tmux_pane_exists", lambda pane_id: pane_id == "%81")
+    monkeypatch.setattr(
+        "research_copilot.services.codex_runtime._tmux_pane_metadata",
+        lambda pane_id: {
+            "pane_id": "%81",
+            "session_name": "codex-1",
+            "window_name": "brain",
+            "workspace": str(tmp_path),
+        },
+    )
 
     attach_payload = await call_tool(
         "rc_codex_attach",
@@ -338,6 +348,16 @@ async def test_codex_runtime_tools_share_service_contract(monkeypatch: pytest.Mo
 async def test_codex_apply_nudges_tool_routes_to_tmux_consumer(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
     monkeypatch.chdir(tmp_path)
     initialize_workspace()
+    monkeypatch.setattr("research_copilot.services.codex_runtime._tmux_pane_exists", lambda pane_id: pane_id == "%81")
+    monkeypatch.setattr(
+        "research_copilot.services.codex_runtime._tmux_pane_metadata",
+        lambda pane_id: {
+            "pane_id": "%81",
+            "session_name": "codex-1",
+            "window_name": "brain",
+            "workspace": str(tmp_path),
+        },
+    )
 
     await call_tool(
         "rc_codex_attach",
@@ -356,7 +376,6 @@ async def test_codex_apply_nudges_tool_routes_to_tmux_consumer(monkeypatch: pyte
         },
     )
 
-    monkeypatch.setattr("research_copilot.services.codex_runtime._tmux_pane_exists", lambda pane_id: pane_id == "%81")
     sent: list[tuple[str, ...]] = []
 
     def fake_run_tmux_command(*args: str):

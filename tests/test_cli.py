@@ -524,6 +524,16 @@ def test_runtime_help_lists_codex_runtime_commands():
 
 def test_runtime_codex_commands_attach_report_and_drain(monkeypatch, tmp_path):
     monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("research_copilot.services.codex_runtime._tmux_pane_exists", lambda pane_id: pane_id == "%71")
+    monkeypatch.setattr(
+        "research_copilot.services.codex_runtime._tmux_pane_metadata",
+        lambda pane_id: {
+            "pane_id": "%71",
+            "session_name": "codex-1",
+            "window_name": "brain",
+            "workspace": str(tmp_path),
+        },
+    )
     runner = CliRunner()
 
     attach_result = runner.invoke(
@@ -608,6 +618,16 @@ def test_runtime_codex_commands_attach_report_and_drain(monkeypatch, tmp_path):
 
 def test_runtime_codex_apply_nudges_command_routes_to_live_pane(monkeypatch, tmp_path):
     monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("research_copilot.services.codex_runtime._tmux_pane_exists", lambda pane_id: pane_id == "%71")
+    monkeypatch.setattr(
+        "research_copilot.services.codex_runtime._tmux_pane_metadata",
+        lambda pane_id: {
+            "pane_id": "%71",
+            "session_name": "codex-1",
+            "window_name": "brain",
+            "workspace": str(tmp_path),
+        },
+    )
     runner = CliRunner()
 
     runner.invoke(
@@ -639,7 +659,6 @@ def test_runtime_codex_apply_nudges_command_routes_to_live_pane(monkeypatch, tmp
         ],
     )
 
-    monkeypatch.setattr("research_copilot.services.codex_runtime._tmux_pane_exists", lambda pane_id: pane_id == "%71")
     sent: list[tuple[str, ...]] = []
 
     def fake_run_tmux_command(*args: str):

@@ -86,6 +86,16 @@ class TestWorkflowSnapshot:
 
     def test_canonical_snapshot_uses_codex_active_session_when_present(self, monkeypatch, tmp_path):
         monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr("research_copilot.services.codex_runtime._tmux_pane_exists", lambda pane_id: pane_id == "%91")
+        monkeypatch.setattr(
+            "research_copilot.services.codex_runtime._tmux_pane_metadata",
+            lambda pane_id: {
+                "pane_id": "%91",
+                "session_name": "codex-1",
+                "window_name": "brain",
+                "workspace": str(tmp_path),
+            },
+        )
         attach_codex_session(
             session_id="codex-1",
             goal="Monitor Codex runtime in the dashboard",

@@ -32,6 +32,16 @@ def clean_research_state_env(monkeypatch) -> None:
 
 def test_attach_codex_session_persists_active_transport_and_resolver(monkeypatch, tmp_path) -> None:
     monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("research_copilot.services.codex_runtime._tmux_pane_exists", lambda pane_id: pane_id == "%12")
+    monkeypatch.setattr(
+        "research_copilot.services.codex_runtime._tmux_pane_metadata",
+        lambda pane_id: {
+            "pane_id": "%12",
+            "session_name": "research",
+            "window_name": "brain",
+            "workspace": str(tmp_path),
+        },
+    )
 
     payload = attach_codex_session(
         session_id="codex-1",
@@ -55,6 +65,27 @@ def test_attach_codex_session_persists_active_transport_and_resolver(monkeypatch
     assert resolved["source"] == "codex"
     assert resolved["session_id"] == "codex-1"
     assert resolved["goal"] == "Investigate scheduler drift"
+
+
+def test_attach_codex_session_rejects_tmux_workspace_mismatch(monkeypatch, tmp_path) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("research_copilot.services.codex_runtime._tmux_pane_exists", lambda pane_id: pane_id == "%12")
+    monkeypatch.setattr(
+        "research_copilot.services.codex_runtime._tmux_pane_metadata",
+        lambda pane_id: {
+            "pane_id": "%12",
+            "session_name": "wrong",
+            "window_name": "brain",
+            "workspace": "C:/somewhere-else",
+        },
+    )
+
+    with pytest.raises(ValueError, match="does not match workspace"):
+        attach_codex_session(
+            session_id="codex-1",
+            pane_id="%12",
+            workspace=str(tmp_path),
+        )
 
 
 def test_turn_report_ingestion_updates_active_session_and_summary(monkeypatch, tmp_path) -> None:
@@ -180,6 +211,15 @@ def test_apply_codex_nudges_sends_to_tmux_pane_and_drains(monkeypatch, tmp_path)
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr("research_copilot.services.codex_runtime._run_tmux_command", fake_run_tmux_command)
     monkeypatch.setattr("research_copilot.services.codex_runtime._tmux_pane_exists", lambda pane_id: pane_id == "%12")
+    monkeypatch.setattr(
+        "research_copilot.services.codex_runtime._tmux_pane_metadata",
+        lambda pane_id: {
+            "pane_id": "%12",
+            "session_name": "codex-1",
+            "window_name": "brain",
+            "workspace": str(tmp_path),
+        },
+    )
     attach_codex_session(session_id="codex-1", pane_id="%12", window_name="brain", session_name="codex-1")
     enqueue_codex_nudge(session_id="codex-1", kind="request_summary", message="Need a tighter recap.")
     enqueue_codex_nudge(session_id="codex-1", kind="stop_after_turn", message="Stop after this turn.")
@@ -192,6 +232,35 @@ def test_apply_codex_nudges_sends_to_tmux_pane_and_drains(monkeypatch, tmp_path)
     assert any(args[:3] == ("send-keys", "-t", "%12") for args in sent)
     assert any("Need a tighter recap." in " ".join(args) for args in sent)
     assert any("Stop after this turn." in " ".join(args) for args in sent)
+
+
+def test_apply_codex_nudges_rejects_tmux_metadata_mismatch(monkeypatch, tmp_path) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("research_copilot.services.codex_runtime._tmux_pane_exists", lambda pane_id: pane_id == "%12")
+    monkeypatch.setattr(
+        "research_copilot.services.codex_runtime._tmux_pane_metadata",
+        lambda pane_id: {
+            "pane_id": "%12",
+            "session_name": "codex-1",
+            "window_name": "brain",
+            "workspace": str(tmp_path),
+        },
+    )
+    attach_codex_session(session_id="codex-1", pane_id="%12", window_name="brain", session_name="codex-1")
+    enqueue_codex_nudge(session_id="codex-1", kind="request_summary", message="Need a tighter recap.")
+
+    monkeypatch.setattr(
+        "research_copilot.services.codex_runtime._tmux_pane_metadata",
+        lambda pane_id: {
+            "pane_id": "%12",
+            "session_name": "other-session",
+            "window_name": "brain",
+            "workspace": str(tmp_path),
+        },
+    )
+
+    with pytest.raises(ValueError, match="not expected session"):
+        apply_codex_nudges(session_id="codex-1")
 
 
 def test_codex_runtime_status_reports_lagging_and_stale_from_heartbeat_age(monkeypatch, tmp_path) -> None:
