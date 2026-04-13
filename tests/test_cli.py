@@ -426,6 +426,18 @@ def test_workflow_help_lists_autonomous_lifecycle_commands_when_runtime_lane_is_
 def test_workflow_autonomous_start_reports_generation_and_brain_driver(monkeypatch, tmp_path):
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(main_module, "_launch_autonomous_worker", lambda payload: None)
+    monkeypatch.setattr(
+        main_module,
+        "_start_managed_codex_runtime",
+        lambda goal="": {
+            "run_id": "codex-1",
+            "runtime_id": "codex-1",
+            "generation_id": "gen-start",
+            "brain_driver": "codex",
+            "status": "active",
+            "summary": "Managed Codex runtime started.",
+        },
+    )
     runner = CliRunner()
 
     result = runner.invoke(
@@ -455,6 +467,27 @@ def test_workflow_autonomous_start_reports_generation_and_brain_driver(monkeypat
 def test_workflow_autonomous_continue_reuses_healthy_runtime_instead_of_starting_new_one(monkeypatch, tmp_path):
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(main_module, "_launch_autonomous_worker", lambda payload: None)
+    monkeypatch.setattr(
+        main_module,
+        "_active_codex_session_payload",
+        lambda requested_id="": {
+            "session_id": "codex-1",
+            "run_id": "codex-1",
+        },
+    )
+    monkeypatch.setattr(
+        main_module,
+        "_continue_managed_codex_runtime",
+        lambda requested_id="", goal="": {
+            "run_id": "codex-1",
+            "runtime_id": "codex-1",
+            "generation_id": "gen-continue",
+            "brain_driver": "codex",
+            "status": "active",
+            "summary": "Managed Codex runtime reused.",
+            "reconcile_action": "reused",
+        },
+    )
     save_autonomous_runtime(
         {
             "schema_version": "1.0",
@@ -481,9 +514,9 @@ def test_workflow_autonomous_continue_reuses_healthy_runtime_instead_of_starting
 
     assert result.exit_code == 0, result.output
     payload = json.loads(result.output)["data"]
-    assert payload["run_id"] == "run-1"
+    assert payload["run_id"] == "codex-1"
     assert payload["generation_id"] == "gen-continue"
-    assert payload["brain_driver"] == "workflow"
+    assert payload["brain_driver"] == "codex"
 
 
 def test_workflow_triage_human_output_uses_recommended_next_action(monkeypatch):

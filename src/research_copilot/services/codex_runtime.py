@@ -880,6 +880,7 @@ def attach_codex_session(
         "health_state": _string(current.get("health_state")) or "managed_degraded",
         "brain_type": "codex",
         "session_id": resolved_session_id,
+        "run_id": _string(current.get("run_id")) or resolved_session_id,
         "status": _string(status) or _string(current.get("status")) or "running",
         "goal": _string(goal) or _string(current.get("goal")),
         "constraints": constraints if constraints is not None else _string_list(current.get("constraints")),

@@ -37,6 +37,7 @@ from research_copilot.research_state import (
     is_legacy_workspace,
     is_workspace_initialized,
     load_onboarding_contract,
+    load_codex_active_session,
     migrate_workspace,
     remember_workspace,
     resolve_workspace,
@@ -600,6 +601,111 @@ def _codex_worker_env() -> dict[str, str]:
     if src_root not in paths:
         env["PYTHONPATH"] = os.pathsep.join([src_root, *paths]) if paths else src_root
     return env
+
+
+def _run_tmux_cli(*args: str) -> str:
+    popen_kwargs: dict[str, Any] = {
+        "args": ["tmux", *args],
+        "check": True,
+        "capture_output": True,
+        "text": True,
+        "encoding": "utf-8",
+        "errors": "replace",
+    }
+    if os.name == "nt":
+        creationflags = int(getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        if creationflags:
+            popen_kwargs["creationflags"] = creationflags
+    return subprocess.run(**popen_kwargs).stdout
+
+
+def _tmux_pane_exists_cli(pane_id: str) -> bool:
+    if not pane_id:
+        return False
+    try:
+        output = _run_tmux_cli("list-panes", "-a", "-F", "#{pane_id}")
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return False
+    return pane_id in {line.strip() for line in output.splitlines() if line.strip()}
+
+
+def _new_codex_session_name() -> str:
+    workspace = resolve_workspace().workspace_dir.name or "workspace"
+    slug = "".join(ch if ch.isalnum() or ch in {"-", "_"} else "-" for ch in workspace.lower()).strip("-")
+    return f"rc-codex-{slug or 'workspace'}-{uuid4().hex[:8]}"
+
+
+def _launch_codex_tmux_session(*, workspace: str) -> tuple[str, str]:
+    session_name = _new_codex_session_name()
+    command = f'codex --dangerously-bypass-approvals-and-sandbox --no-alt-screen -C "{workspace}"'
+    _run_tmux_cli("new-session", "-d", "-s", session_name, "-n", "brain", "-c", workspace, command)
+    pane_id = _run_tmux_cli("list-panes", "-t", f"{session_name}:0", "-F", "#{pane_id}").splitlines()[0].strip()
+    return session_name, pane_id
+
+
+def _managed_codex_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    normalized = dict(payload)
+    normalized["run_id"] = str(normalized.get("run_id") or normalized.get("session_id") or "")
+    normalized["runtime_id"] = str(normalized.get("runtime_id") or normalized["run_id"])
+    normalized["brain_driver"] = str(normalized.get("brain_driver") or "codex")
+    return normalized
+
+
+def _active_codex_session_payload(*, requested_id: str = "") -> dict[str, Any]:
+    payload = load_codex_active_session()
+    if not payload:
+        return {}
+    session_id = str(payload.get("session_id") or "")
+    if requested_id and requested_id not in {session_id, str(payload.get("run_id") or "")}:
+        return {}
+    return payload
+
+
+def _start_managed_codex_runtime(*, goal: str) -> dict[str, Any]:
+    workspace = str(resolve_workspace().workspace_dir)
+    session_name, pane_id = _launch_codex_tmux_session(workspace=workspace)
+    payload = start_codex_supervisor(
+        session_id=session_name,
+        pane_id=pane_id,
+        goal=goal,
+        workspace=workspace,
+        window_name="brain",
+        session_name=session_name,
+    )
+    _launch_codex_worker(payload)
+    normalized = _managed_codex_payload(payload)
+    normalized["reconcile_action"] = "started"
+    return normalized
+
+
+def _continue_managed_codex_runtime(*, requested_id: str = "", goal: str = "") -> dict[str, Any]:
+    current = _active_codex_session_payload(requested_id=requested_id)
+    workspace = str(resolve_workspace().workspace_dir)
+    if current:
+        session_id = str(current.get("session_id") or "")
+        pane_id = str(current.get("pane_id") or "")
+        if pane_id and _tmux_pane_exists_cli(pane_id):
+            payload = resume_codex_supervisor(session_id=session_id)
+            _launch_codex_worker(payload)
+            normalized = _managed_codex_payload(payload)
+            normalized["reconcile_action"] = "reused"
+            return normalized
+        new_session_name, new_pane_id = _launch_codex_tmux_session(workspace=workspace)
+        payload = start_codex_supervisor(
+            session_id=session_id or new_session_name,
+            pane_id=new_pane_id,
+            goal=goal or str(current.get("goal") or ""),
+            workspace=workspace,
+            window_name="brain",
+            session_name=new_session_name,
+        )
+        _launch_codex_worker(payload)
+        normalized = _managed_codex_payload(payload)
+        normalized["reconcile_action"] = "replaced"
+        return normalized
+    normalized = _start_managed_codex_runtime(goal=goal)
+    normalized["reconcile_action"] = "started"
+    return normalized
 
 
 def _should_launch_codex_worker(payload: Any) -> bool:
@@ -1834,6 +1940,17 @@ def workflow_autonomous_run(
     as_json: bool,
 ):
     """Start the canonical autonomous workflow runtime and detach its worker."""
+    if brain_driver == "codex":
+        _guard_machine_mutation(as_json)
+        payload = _start_managed_codex_runtime(goal=goal)
+        run_id = str(_runtime_value(payload, "run_id") or "unknown")
+        status_value = str(_runtime_value(payload, "status") or "running")
+        _emit_result(
+            payload,
+            as_json,
+            _runtime_summary(payload, f"Managed Codex runtime {run_id} started with status {status_value}."),
+        )
+        return
     _start_autonomous_runtime_command(
         goal=goal,
         brain_driver=brain_driver,
@@ -1911,6 +2028,17 @@ def workflow_autonomous_start(
     as_json: bool,
 ):
     """Start the managed autonomous runtime using the selected brain driver."""
+    if brain_driver == "codex":
+        _guard_machine_mutation(as_json)
+        payload = _start_managed_codex_runtime(goal=goal)
+        run_id = str(_runtime_value(payload, "run_id") or "unknown")
+        status_value = str(_runtime_value(payload, "status") or "running")
+        _emit_result(
+            payload,
+            as_json,
+            _runtime_summary(payload, f"Managed Codex runtime {run_id} started with status {status_value}."),
+        )
+        return
     _start_autonomous_runtime_command(
         goal=goal,
         brain_driver=brain_driver,
@@ -1935,6 +2063,17 @@ def workflow_autonomous_start(
 @click.option("--json", "as_json", is_flag=True, help="Emit machine-readable JSON.")
 def workflow_autonomous_status(run_id: str, as_json: bool):
     """Inspect canonical autonomous workflow state without mutating it."""
+    active_codex = _active_codex_session_payload(requested_id=run_id)
+    if active_codex:
+        payload = _managed_codex_payload(codex_runtime_status(session_id=str(active_codex.get("session_id") or "")))
+        resolved_run_id = str(_runtime_value(payload, "run_id") or run_id or "active")
+        status_value = str(_runtime_value(payload, "status") or "unknown")
+        _emit_result(
+            payload,
+            as_json,
+            _runtime_summary(payload, f"Managed Codex runtime {resolved_run_id} is {status_value}."),
+        )
+        return
     try:
         payload = _invoke_autonomous_runtime(
             *_AUTONOMOUS_STATUS_CANDIDATES,
@@ -1970,6 +2109,21 @@ def workflow_autonomous_stop(
     as_json: bool,
 ):
     """Request a graceful stop for the canonical autonomous workflow runtime."""
+    active_codex = _active_codex_session_payload(requested_id=run_id)
+    if active_codex:
+        _guard_machine_mutation(as_json)
+        session_id = str(active_codex.get("session_id") or run_id or "")
+        payload = _managed_codex_payload(
+            stop_codex_supervisor(session_id=session_id, owner_token=owner_token, reason=reason)
+        )
+        resolved_run_id = str(_runtime_value(payload, "run_id") or run_id or "active")
+        status_value = str(_runtime_value(payload, "status") or "stopping")
+        _emit_result(
+            payload,
+            as_json,
+            _runtime_summary(payload, f"Managed Codex runtime {resolved_run_id} is now {status_value}."),
+        )
+        return
     _guard_machine_mutation(as_json)
     payload = _invoke_autonomous_runtime(
         *_AUTONOMOUS_STOP_CANDIDATES,
@@ -2006,6 +2160,22 @@ def workflow_autonomous_resume(
     as_json: bool,
 ):
     """Resume a stopped or stale canonical autonomous workflow runtime."""
+    active_codex = _active_codex_session_payload(requested_id=run_id)
+    if active_codex:
+        _guard_machine_mutation(as_json)
+        session_id = str(active_codex.get("session_id") or run_id or "")
+        payload = _managed_codex_payload(
+            resume_codex_supervisor(session_id=session_id, owner_token=owner_token)
+        )
+        _launch_codex_worker(payload)
+        resolved_run_id = str(_runtime_value(payload, "run_id") or run_id or "active")
+        status_value = str(_runtime_value(payload, "status") or "running")
+        _emit_result(
+            payload,
+            as_json,
+            _runtime_summary(payload, f"Managed Codex runtime {resolved_run_id} resumed with status {status_value}."),
+        )
+        return
     _guard_machine_mutation(as_json)
     payload = _invoke_autonomous_runtime(
         *_AUTONOMOUS_RESUME_CANDIDATES,
@@ -2077,6 +2247,18 @@ def workflow_autonomous_continue(
     as_json: bool,
 ):
     """Reuse a healthy runtime, reconcile a stale one, or start a managed runtime."""
+    if brain_driver == "codex" or _active_codex_session_payload(requested_id=run_id):
+        _guard_machine_mutation(as_json)
+        payload = _continue_managed_codex_runtime(requested_id=run_id, goal=goal)
+        resolved_run_id = str(_runtime_value(payload, "run_id") or run_id or "active")
+        status_value = str(_runtime_value(payload, "status") or "running")
+        action = str(payload.get("reconcile_action") or "continued")
+        _emit_result(
+            payload,
+            as_json,
+            _runtime_summary(payload, f"Managed Codex runtime {resolved_run_id} {action} with status {status_value}."),
+        )
+        return
     _guard_machine_mutation(as_json)
     payload = _invoke_autonomous_runtime(
         *_AUTONOMOUS_CONTINUE_CANDIDATES,
