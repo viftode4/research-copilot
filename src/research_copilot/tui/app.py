@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import shutil
 import time
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Callable
+from typing import Callable, TypeVar
 
 from rich.columns import Columns
 from rich.console import Console, Group, RenderableType
@@ -49,6 +50,7 @@ NARROW_WIDTH = 120
 MEDIUM_WIDTH = 160
 SHORT_HEIGHT = 32
 DEFAULT_AUTO_REFRESH_INTERVAL_SECONDS = 2.0
+T = TypeVar("T")
 
 FILTER_CYCLES = {
     "runs": ("all", "active", "completed", "failed"),
@@ -150,16 +152,26 @@ class ResearchCopilotTUI:
 
     def move_selection(self, step: int) -> None:
         pane = self.current_pane
-        if pane == "runs" and self.snapshot.jobs:
-            self.selected_job_index = (self.selected_job_index + step) % len(self.snapshot.jobs)
-        elif pane == "experiments" and self.snapshot.experiments:
-            self.selected_experiment_index = (self.selected_experiment_index + step) % len(self.snapshot.experiments)
-        elif pane == "insights" and self.snapshot.insights:
-            self.selected_insight_index = (self.selected_insight_index + step) % len(self.snapshot.insights)
-        elif pane == "papers" and self.snapshot.papers:
-            self.selected_paper_index = (self.selected_paper_index + step) % len(self.snapshot.papers)
-        elif pane == "context" and self.snapshot.context_entries:
-            self.selected_context_index = (self.selected_context_index + step) % len(self.snapshot.context_entries)
+        if pane == "runs":
+            jobs = self._visible_jobs()
+            if jobs:
+                self.selected_job_index = (self.selected_job_index + step) % len(jobs)
+        elif pane == "experiments":
+            experiments = self._visible_experiments()
+            if experiments:
+                self.selected_experiment_index = (self.selected_experiment_index + step) % len(experiments)
+        elif pane == "insights":
+            insights = self._visible_insights()
+            if insights:
+                self.selected_insight_index = (self.selected_insight_index + step) % len(insights)
+        elif pane == "papers":
+            papers = self._visible_papers()
+            if papers:
+                self.selected_paper_index = (self.selected_paper_index + step) % len(papers)
+        elif pane == "context":
+            context_entries = self._visible_context_entries()
+            if context_entries:
+                self.selected_context_index = (self.selected_context_index + step) % len(context_entries)
         self._reset_scroll_state()
 
     def handle_command(self, command: str) -> bool:
@@ -693,17 +705,19 @@ class ResearchCopilotTUI:
         if not jobs:
             return Text("No runs yet. Submit or sync a run to monitor it here.", style="dim")
 
+        effective_limit = self._list_visible_capacity("runs", requested_limit=limit)
+        window_start, visible_jobs = self._windowed_items(jobs, self.selected_job_index, effective_limit)
         table = Table(expand=True)
         table.add_column("Sel", width=3)
         table.add_column("Run", style="bold")
         table.add_column("Status")
         table.add_column("GPU", justify="right", width=5)
         table.add_column("Submitted", width=16)
-        for index, job in enumerate(jobs[:limit]):
+        for index, job in enumerate(visible_jobs, start=window_start):
             selected = "▶" if index == self.selected_job_index else " "
             table.add_row(
                 selected,
-                job.name,
+                self._truncate_inline(job.name, limit=48),
                 Text(job.status, style=self._status_style(job.status)),
                 str(job.gpus),
                 format_timestamp(job.submitted_at),
@@ -715,19 +729,25 @@ class ResearchCopilotTUI:
         if not experiments:
             return Text("No experiments tracked yet. Store one to populate this view.", style="dim")
 
+        effective_limit = self._list_visible_capacity("experiments", requested_limit=limit)
+        window_start, visible_experiments = self._windowed_items(
+            experiments,
+            self.selected_experiment_index,
+            effective_limit,
+        )
         table = Table(expand=True)
         table.add_column("Sel", width=3)
         table.add_column("Experiment", style="bold")
         table.add_column("Status")
         table.add_column("Dataset")
         table.add_column("Updated", width=16)
-        for index, experiment in enumerate(experiments[:limit]):
+        for index, experiment in enumerate(visible_experiments, start=window_start):
             selected = "▶" if index == self.selected_experiment_index else " "
             table.add_row(
                 selected,
-                experiment.name,
+                self._truncate_inline(experiment.name, limit=56),
                 Text(experiment.status, style=self._status_style(experiment.status)),
-                experiment.dataset or "—",
+                self._truncate_inline(experiment.dataset or "—", limit=18),
                 format_timestamp(experiment.updated_at),
             )
         return table
@@ -802,10 +822,11 @@ class ResearchCopilotTUI:
         table.add_column("Title", style="bold")
         table.add_column("Category")
         table.add_column("Confidence", justify="right")
-        visible = insights if limit is None else insights[:limit]
-        for index, insight in enumerate(visible):
+        effective_limit = self._list_visible_capacity("insights", requested_limit=limit)
+        window_start, visible = self._windowed_items(insights, self.selected_insight_index, effective_limit)
+        for index, insight in enumerate(visible, start=window_start):
             selected = "▶" if index == self.selected_insight_index else " "
-            table.add_row(selected, insight.title, insight.category, insight.confidence)
+            table.add_row(selected, self._truncate_inline(insight.title, limit=42), insight.category, insight.confidence)
         return table
 
     def _render_papers_table(self, limit: int | None = None) -> RenderableType:
@@ -817,13 +838,14 @@ class ResearchCopilotTUI:
         table.add_column("Title", style="bold")
         table.add_column("Authors")
         table.add_column("Year", width=6)
-        visible = papers if limit is None else papers[:limit]
-        for index, paper in enumerate(visible):
+        effective_limit = self._list_visible_capacity("papers", requested_limit=limit)
+        window_start, visible = self._windowed_items(papers, self.selected_paper_index, effective_limit)
+        for index, paper in enumerate(visible, start=window_start):
             selected = "▶" if index == self.selected_paper_index else " "
             authors = ", ".join(paper.authors[:2]) if paper.authors else "—"
             if len(paper.authors) > 2:
                 authors += " +"
-            table.add_row(selected, paper.title, authors, paper.year)
+            table.add_row(selected, self._truncate_inline(paper.title, limit=40), self._truncate_inline(authors, limit=24), paper.year)
         return table
 
     def _render_context_table(self, limit: int | None = None) -> RenderableType:
@@ -835,11 +857,12 @@ class ResearchCopilotTUI:
         table.add_column("Key", style="bold")
         table.add_column("Type")
         table.add_column("Value")
-        visible = context_entries if limit is None else context_entries[:limit]
-        for index, context in enumerate(visible):
+        effective_limit = self._list_visible_capacity("context", requested_limit=limit)
+        window_start, visible = self._windowed_items(context_entries, self.selected_context_index, effective_limit)
+        for index, context in enumerate(visible, start=window_start):
             selected = "▶" if index == self.selected_context_index else " "
-            value = context.value[:48] + ("…" if len(context.value) > 48 else "")
-            table.add_row(selected, context.key, context.context_type, value)
+            value = self._truncate_inline(context.value, limit=42)
+            table.add_row(selected, self._truncate_inline(context.key, limit=24), context.context_type, value)
         return table
 
     def _render_links_summary(self, entity_id: str | None) -> RenderableType:
@@ -1479,6 +1502,56 @@ class ResearchCopilotTUI:
             return self.viewport_width, self.viewport_height
         fallback = shutil.get_terminal_size((120, 40))
         return fallback.columns, fallback.lines
+
+    def _list_visible_capacity(self, pane: str, *, requested_limit: int | None = None) -> int:
+        _, height = self._viewport_dimensions()
+        if self.current_screen == "overview":
+            base = 4 if self._is_short_layout() else 5 if self._is_narrow_layout() else 8
+        elif self.current_screen in {"runs", "experiments"}:
+            if self._is_short_layout():
+                base = 6
+            elif self._is_narrow_layout():
+                base = 8
+            elif self._is_medium_layout():
+                base = 10
+            else:
+                base = 12
+        else:
+            if self._is_short_layout():
+                base = 6
+            elif self._is_narrow_layout():
+                base = 7
+            elif self._is_medium_layout():
+                base = 9
+            else:
+                base = 10
+        base = min(base, max(3, height - 14))
+        if requested_limit is not None:
+            return max(1, min(requested_limit, base))
+        return max(1, base)
+
+    def _windowed_items(
+        self,
+        items: Sequence[T],
+        selected_index: int,
+        limit: int | None,
+        *,
+        context_rows: int = 1,
+    ) -> tuple[int, tuple[T, ...]]:
+        if limit is None or limit >= len(items):
+            return 0, tuple(items)
+        if limit <= 1:
+            start = min(max(selected_index, 0), len(items) - 1)
+            return start, (items[start],)
+        padding = max(1, min(context_rows, limit - 1))
+        start = max(0, selected_index - padding)
+        end = start + limit
+        if end <= len(items) and selected_index < start + limit - padding:
+            return start, tuple(items[start:end])
+        start = max(0, selected_index - (limit - padding - 1))
+        end = min(len(items), start + limit)
+        start = max(0, end - limit)
+        return start, tuple(items[start:end])
 
     def _renderable_line_count(self, renderable: RenderableType, *, width: int) -> int:
         console = Console(width=max(20, width))

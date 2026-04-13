@@ -315,7 +315,7 @@ def test_tui_command_renders_seeded_workflow_views():
     assert result.exit_code == 0
     assert "pfn-train" in result.output
     assert "Active runs" in result.output
-    assert "Recent experiments" in result.output
+    assert "Experiments" in result.output
 
 
 
@@ -327,7 +327,7 @@ def test_status_and_top_level_help_reflect_terminal_first_surface(monkeypatch, t
     help_result = runner.invoke(cli, ["--help"])
 
     assert status_result.exit_code == 0
-    assert "research-copilot tui" in status_result.output
+    assert "Open 'research-copilot' for the read-only TUI" in status_result.output
     assert "Workflow Snapshot" in status_result.output
     assert "Onboarding:" in status_result.output
     assert "research-copilot init" in status_result.output

@@ -132,6 +132,46 @@ def _seeded_snapshot() -> DashboardSnapshot:
     )
 
 
+def _snapshot_with_many_runs(count: int) -> DashboardSnapshot:
+    snapshot = _seeded_snapshot()
+    jobs = tuple(
+        JobRecord(
+            entity_id=f"run:job-{index}",
+            job_id=f"job-{index}",
+            run_id=f"job-{index}",
+            name=f"Run {index:02d}",
+            status="RUNNING" if index == 0 else "COMPLETED",
+            partition="gpu",
+            gpus=index % 2,
+            submitted_at=f"2026-04-11T13:{index:02d}:00+00:00",
+            started_at=f"2026-04-11T13:{index:02d}:30+00:00",
+            completed_at="" if index == 0 else f"2026-04-11T14:{index:02d}:00+00:00",
+            time_limit="04:00:00",
+            log_tail=f"log line {index}",
+            error_tail="(no stderr)",
+        )
+        for index in range(count)
+    )
+    return replace(snapshot, jobs=jobs)
+
+
+def _snapshot_with_many_insights(count: int) -> DashboardSnapshot:
+    snapshot = _seeded_snapshot()
+    insights = tuple(
+        InsightRecord(
+            entity_id=f"insight:ins-{index}",
+            insight_id=f"ins-{index}",
+            title=f"Insight {index:02d}",
+            category="finding",
+            confidence=f"0.{90 - (index % 10)}",
+            content=f"Insight detail {index:02d}",
+            created_at=f"2026-04-11T13:{index:02d}:00+00:00",
+        )
+        for index in range(count)
+    )
+    return replace(snapshot, insights=insights)
+
+
 def _runtime_field_name() -> str | None:
     for candidate in ("runtime", "runtime_status", "autonomous_runtime"):
         if candidate in DashboardSnapshot.__dataclass_fields__:
@@ -486,6 +526,41 @@ def test_overview_static_render_fits_short_narrow_viewport():
     assert "Research Copilot" in rendered
 
 
+def test_runs_list_window_follows_selection():
+    app = ResearchCopilotTUI(snapshot_loader=lambda: _snapshot_with_many_runs(18))
+    app.viewport_width = 100
+    app.viewport_height = 18
+    app.handle_command("2")
+    app.sort_modes["runs"] = "name"
+
+    for _ in range(10):
+        app.handle_command("j")
+
+    rendered = _render_text_with_width(app.render(), width=100)
+
+    _assert_render_fits_viewport(rendered, width=100, height=18)
+    assert "Run 10" in rendered
+    assert "Run 00" not in rendered
+
+
+def test_research_list_window_follows_selection_and_detail():
+    app = ResearchCopilotTUI(snapshot_loader=lambda: _snapshot_with_many_insights(24))
+    app.viewport_width = 100
+    app.viewport_height = 28
+    app.handle_command("4")
+    app.sort_modes["insights"] = "title"
+
+    for _ in range(9):
+        app.handle_command("j")
+
+    rendered = _render_text_with_width(app.render(), width=100)
+
+    _assert_render_fits_viewport(rendered, width=100, height=28)
+    assert "Insight 09" in rendered
+    assert "Insight 00" not in rendered
+    assert "Insight detail 09" in rendered
+
+
 def test_auto_refresh_runs_when_interval_elapses():
     calls = {"count": 0}
     current_time = {"value": 0.0}
@@ -575,7 +650,7 @@ def test_overview_renders_runtime_panel_when_runtime_lane_is_available():
 
     rendered = _render_text(app.render())
 
-    assert "Live Codex Runtime" in rendered
+    assert "Advanced Codex Runtime" in rendered
     assert "running" in rendered.lower()
     assert "review-results" in rendered
 
