@@ -11,10 +11,22 @@ State lives in `.research-copilot/` inside the workspace.
 
 ## Quick Start
 
+Prerequisites:
+
+- Python 3.11+
+- `tmux` on PATH
+- `codex` on PATH if you want a live Codex brain
+
 Install:
 
 ```bash
 pipx install research-copilot
+```
+
+For local development from a checkout:
+
+```bash
+pip install -e .
 ```
 
 Initialize a workspace:
@@ -27,6 +39,12 @@ Open the TUI:
 
 ```bash
 research-copilot
+```
+
+If you are operating from another shell against an already-initialized workspace, set the workspace explicitly:
+
+```bash
+research-copilot --workspace "G:\Projects\my-research" status
 ```
 
 Run JSON-safe workflow commands:
@@ -153,3 +171,12 @@ research-copilot --help
 research-copilot workflow --help
 research-copilot runtime --help
 ```
+
+## MVP Limitations
+
+- The TUI is read-only. Mutating actions still go through CLI workflow/runtime commands.
+- The live Codex runtime can continue autonomously, but it still depends on the Codex pane accepting and following the injected bounded-turn prompt.
+- The supervisor currently targets tmux panes only.
+- Steering is applied as text injected into the registered Codex pane; it is not a model-native control channel.
+- The runtime/dashboard path is local and single-user. It is not a multi-user remote control plane.
+- Very long content now pages in the main detail/modals, but this is still a terminal UI, not a full rich-scroll application.
