@@ -18,9 +18,10 @@ def test_render_codex_config_includes_stdio_install_and_config_toml(monkeypatch,
     rendered = render_codex_config()
 
     assert "codex mcp add" in rendered
-    assert "research-copilot mcp serve" in rendered
+    assert "research-copilot --workspace" in rendered
+    assert "mcp serve" in rendered
     assert "[mcp_servers.research-copilot]" in rendered
-    assert 'RC_WORKING_DIR = "' in rendered
+    assert 'args = ["--workspace",' in rendered
 
 
 def test_render_claude_config_uses_project_scoped_json_and_env_placeholders():
@@ -31,6 +32,7 @@ def test_render_claude_config_uses_project_scoped_json_and_env_placeholders():
     assert '"research-copilot"' in rendered
     assert "${RESEARCH_COPILOT_BIN:-research-copilot}" in rendered
     assert "${RESEARCH_COPILOT_WORKSPACE:-.}" in rendered
+    assert '"--workspace"' in rendered
     assert "prompt for approval" in rendered
     assert "fail to parse" in rendered
 
@@ -67,3 +69,16 @@ def test_mcp_cli_help_and_render_commands_are_available(monkeypatch, tmp_path):
 
     assert agents_result.exit_code == 0, agents_result.output
     assert "Always use the `research-copilot` MCP server" in agents_result.output
+
+
+def test_print_codex_config_uses_workspace_override_and_quotes_path(monkeypatch, tmp_path):
+    workspace = tmp_path / "workspace with spaces"
+    workspace.mkdir(parents=True)
+    runner = CliRunner()
+
+    monkeypatch.chdir(tmp_path)
+    result = runner.invoke(cli, ["--workspace", str(workspace), "mcp", "print-codex-config"])
+
+    assert result.exit_code == 0, result.output
+    assert f'codex mcp add research-copilot -- research-copilot --workspace "{workspace.as_posix()}" mcp serve' in result.output
+    assert f'args = ["--workspace", "{workspace.as_posix()}", "mcp", "serve"]' in result.output

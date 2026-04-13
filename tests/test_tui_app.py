@@ -135,6 +135,12 @@ def _render_text(renderable) -> str:
     return console.export_text()
 
 
+def _render_text_with_width(renderable, width: int) -> str:
+    console = Console(record=True, width=width)
+    console.print(renderable)
+    return console.export_text()
+
+
 def test_tui_navigation_commands_cycle_views():
     app = ResearchCopilotTUI(snapshot_loader=_seeded_snapshot)
 
@@ -296,3 +302,154 @@ def test_tui_palette_can_execute_direct_shortcuts():
     assert app.show_palette is False
     assert app.current_screen == "research"
     assert app.current_pane == "papers"
+
+
+def test_runs_screen_stacks_panels_in_narrow_viewport():
+    app = ResearchCopilotTUI(snapshot_loader=_seeded_snapshot)
+    app.viewport_width = 100
+    app.viewport_height = 28
+    app.handle_command("2")
+
+    rendered = _render_text(app.render())
+
+    assert "Runs" in rendered
+    assert "Run focus" in rendered
+
+
+def test_experiments_screen_stacks_panels_in_narrow_viewport():
+    app = ResearchCopilotTUI(snapshot_loader=_seeded_snapshot)
+    app.viewport_width = 100
+    app.viewport_height = 28
+    app.handle_command("3")
+
+    rendered = _render_text(app.render())
+
+    assert "Experiments" in rendered
+    assert "Experiment focus" in rendered
+
+
+def test_research_screen_uses_single_active_list_in_narrow_viewport():
+    app = ResearchCopilotTUI(snapshot_loader=_seeded_snapshot)
+    app.viewport_width = 100
+    app.viewport_height = 28
+    app.handle_command("4")
+
+    rendered = _render_text(app.render())
+    assert "Research navigation" in rendered
+    assert "Research list — Insights" in rendered
+    assert "Research focus" in rendered
+
+    app.handle_command("tab")
+    rendered = _render_text(app.render())
+    assert "Research list — Papers" in rendered
+
+
+def test_footer_switches_to_compact_hint_in_narrow_or_short_viewport():
+    app = ResearchCopilotTUI(snapshot_loader=_seeded_snapshot)
+    app.viewport_width = 100
+    app.viewport_height = 28
+
+    footer = _render_text(app._render_footer())
+
+    assert "1-4 • Tab • j/k • Enter" in footer
+
+
+def test_runs_screen_fits_short_viewport_with_compact_header_and_body():
+    app = ResearchCopilotTUI(snapshot_loader=_seeded_snapshot)
+    app.viewport_width = 100
+    app.viewport_height = 28
+    app.handle_command("2")
+
+    rendered = _render_text_with_width(app.render(), width=100)
+
+    assert len(rendered.splitlines()) <= 28
+    assert "Run focus" in rendered
+
+
+def test_experiments_screen_fits_short_viewport_with_compact_header_and_body():
+    app = ResearchCopilotTUI(snapshot_loader=_seeded_snapshot)
+    app.viewport_width = 100
+    app.viewport_height = 28
+    app.handle_command("3")
+
+    rendered = _render_text_with_width(app.render(), width=100)
+
+    assert len(rendered.splitlines()) <= 28
+    assert "Experiment focus" in rendered
+
+
+def test_research_screen_fits_short_viewport_with_compact_header_and_body():
+    app = ResearchCopilotTUI(snapshot_loader=_seeded_snapshot)
+    app.viewport_width = 100
+    app.viewport_height = 28
+    app.handle_command("4")
+
+    rendered = _render_text_with_width(app.render(), width=100)
+
+    assert len(rendered.splitlines()) <= 28
+    assert "Research focus" in rendered
+
+
+def test_auto_refresh_runs_when_interval_elapses():
+    calls = {"count": 0}
+    current_time = {"value": 0.0}
+
+    def loader() -> DashboardSnapshot:
+        calls["count"] += 1
+        return _seeded_snapshot()
+
+    app = ResearchCopilotTUI(snapshot_loader=loader, time_source=lambda: current_time["value"], timestamp_source=lambda: "12:00:00")
+    assert calls["count"] == 2  # initial seed + first refresh in __post_init__
+
+    current_time["value"] = 1.0
+    assert app._maybe_auto_refresh() is False
+    assert calls["count"] == 2
+
+    current_time["value"] = 2.1
+    assert app._maybe_auto_refresh() is True
+    assert calls["count"] == 3
+    assert app.last_refresh_label == "12:00:00"
+
+
+def test_auto_refresh_skips_when_refresh_in_progress():
+    app = ResearchCopilotTUI(snapshot_loader=_seeded_snapshot)
+    app.refresh_in_progress = True
+    app.auto_refresh_enabled = True
+    app.last_refresh_completed_at = 0.0
+    app.time_source = lambda: 5.0
+
+    assert app._maybe_auto_refresh() is False
+
+
+def test_auto_refresh_failure_keeps_previous_snapshot_and_sets_error():
+    app = ResearchCopilotTUI(snapshot_loader=_seeded_snapshot, timestamp_source=lambda: "12:00:00")
+    previous = app.snapshot
+    app.snapshot_loader = lambda: (_ for _ in ()).throw(RuntimeError("boom"))
+    app.last_refresh_completed_at = 0.0
+    app.time_source = lambda: 5.0
+
+    assert app._maybe_auto_refresh() is True
+    assert app.snapshot is previous
+    assert app.last_refresh_error == "boom"
+
+
+def test_manual_refresh_clears_error_and_updates_timestamp():
+    current_time = {"value": 0.0}
+    app = ResearchCopilotTUI(snapshot_loader=_seeded_snapshot, time_source=lambda: current_time["value"], timestamp_source=lambda: "12:34:56")
+    app.last_refresh_error = "boom"
+    current_time["value"] = 10.0
+
+    app.refresh()
+
+    assert app.last_refresh_error == ""
+    assert app.last_refresh_label == "12:34:56"
+
+
+def test_toggle_auto_refresh_shortcut():
+    app = ResearchCopilotTUI(snapshot_loader=_seeded_snapshot)
+
+    assert app.auto_refresh_enabled is True
+    app.handle_command("a")
+    assert app.auto_refresh_enabled is False
+    app.handle_command("a")
+    assert app.auto_refresh_enabled is True

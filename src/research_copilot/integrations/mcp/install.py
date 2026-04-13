@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 DEFAULT_MCP_SERVER_NAME = "research-copilot"
@@ -11,7 +12,7 @@ DEFAULT_MCP_ARGS = ("mcp", "serve")
 
 
 def _workspace_hint() -> str:
-    return Path.cwd().resolve().as_posix()
+    return Path(os.getenv("RC_WORKING_DIR", ".")).resolve().as_posix()
 
 
 def render_codex_config(
@@ -27,15 +28,14 @@ def render_codex_config(
         "Codex MCP quickstart\n"
         "====================\n"
         "1. Add the local stdio server:\n"
-        f"   codex mcp add --env RC_WORKING_DIR=\"{workspace}\" {server_name} -- {command} mcp serve\n"
+        f'   codex mcp add {server_name} -- {command} --workspace "{workspace}" mcp serve\n'
         "2. Verify it is registered:\n"
         "   codex mcp list\n"
         "\n"
         "Equivalent ~/.codex/config.toml entry:\n"
         f"[mcp_servers.{server_name}]\n"
         f'command = "{command}"\n'
-        f"args = [{args}]\n"
-        f'env = {{ RC_WORKING_DIR = "{workspace}" }}\n'
+        f'args = ["--workspace", "{workspace}", {args}]\n'
         "\n"
         "Suggested AGENTS.md reminder:\n"
         f"{agents_hint}\n"
@@ -51,10 +51,11 @@ def render_claude_config(
         "mcpServers": {
             server_name: {
                 "command": "${RESEARCH_COPILOT_BIN:-research-copilot}",
-                "args": list(DEFAULT_MCP_ARGS),
-                "env": {
-                    "RC_WORKING_DIR": "${RESEARCH_COPILOT_WORKSPACE:-.}",
-                },
+                "args": [
+                    "--workspace",
+                    "${RESEARCH_COPILOT_WORKSPACE:-.}",
+                    *DEFAULT_MCP_ARGS,
+                ],
             }
         }
     }
@@ -64,7 +65,7 @@ def render_claude_config(
         "=====================================\n"
         "Save this as .mcp.json at the repository root.\n"
         "Claude Code will prompt for approval before using a project-scoped server from .mcp.json.\n"
-        "This example keeps machine-specific values behind env placeholders.\n"
+        "This example keeps the workspace path behind an env placeholder while using the CLI's explicit --workspace flag.\n"
         "If you remove the default from ${VAR:-default}, Claude Code will fail to parse the file when VAR is missing.\n"
         "\n"
         f"{config_json}\n"

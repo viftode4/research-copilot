@@ -56,33 +56,50 @@ def write_framed_message(stream: BinaryIO, payload: dict[str, Any]) -> None:
     stream.flush()
 
 
+def write_delimited_message(stream: BinaryIO, payload: dict[str, Any]) -> None:
+    """Write one newline-delimited JSON-RPC message for stdio MCP transport."""
+
+    body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+    stream.write(body)
+    stream.write(b"\n")
+    stream.flush()
+
+
 def read_framed_message(stream: BinaryIO) -> dict[str, Any] | None:
-    header_bytes = bytearray()
-    while True:
-        line = stream.readline()
-        if not line:
-            if not header_bytes:
-                return None
-            raise EOFError("Unexpected EOF while reading MCP headers.")
-        header_bytes.extend(line)
-        if header_bytes.endswith(b"\r\n\r\n"):
-            break
+    first_line = stream.readline()
+    if not first_line:
+        return None
 
-    headers: dict[str, str] = {}
-    for raw_line in header_bytes.decode("ascii").split("\r\n"):
-        if not raw_line:
-            continue
-        name, _, value = raw_line.partition(":")
-        headers[name.lower()] = value.strip()
+    if first_line.startswith(b"Content-Length:"):
+        header_bytes = bytearray(first_line)
+        while True:
+            line = stream.readline()
+            if not line:
+                raise EOFError("Unexpected EOF while reading MCP headers.")
+            header_bytes.extend(line)
+            if header_bytes.endswith(b"\r\n\r\n") or header_bytes.endswith(b"\n\n"):
+                break
 
-    content_length = headers.get("content-length")
-    if not content_length:
-        raise ValueError("Missing Content-Length header.")
+        headers: dict[str, str] = {}
+        for raw_line in header_bytes.decode("ascii").splitlines():
+            if not raw_line:
+                continue
+            name, _, value = raw_line.partition(":")
+            headers[name.lower()] = value.strip()
 
-    body = stream.read(int(content_length))
-    if len(body) != int(content_length):
-        raise EOFError("Unexpected EOF while reading MCP body.")
-    return json.loads(body.decode("utf-8"))
+        content_length = headers.get("content-length")
+        if not content_length:
+            raise ValueError("Missing Content-Length header.")
+
+        body = stream.read(int(content_length))
+        if len(body) != int(content_length):
+            raise EOFError("Unexpected EOF while reading MCP body.")
+        return json.loads(body.decode("utf-8"))
+
+    raw = first_line.strip()
+    if not raw:
+        return read_framed_message(stream)
+    return json.loads(raw.decode("utf-8"))
 
 
 class ResearchCopilotMcpServer:
@@ -173,7 +190,7 @@ async def run_stdio_server(
             break
         response = await server.handle_message(message)
         if response is not None:
-            write_framed_message(sink, response)
+            write_delimited_message(sink, response)
 
 
 def serve_stdio(input_stream: BinaryIO | None = None, output_stream: BinaryIO | None = None) -> None:

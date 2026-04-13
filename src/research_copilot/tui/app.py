@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import shutil
+import time
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Callable
 
 from rich.columns import Columns
@@ -39,6 +42,11 @@ PANE_ORDER = {
     "research": ("insights", "papers", "context"),
 }
 COMMAND_HINT = "1-4 views • [/] cycle • Tab panes • j/k move • / search • f filter • s sort • l logs • g links • Ctrl+P palette • ? help • r refresh • q back • Q quit"
+COMPACT_COMMAND_HINT = "1-4 • Tab • j/k • Enter • g • l • / • r • q/Q"
+NARROW_WIDTH = 120
+MEDIUM_WIDTH = 160
+SHORT_HEIGHT = 32
+DEFAULT_AUTO_REFRESH_INTERVAL_SECONDS = 2.0
 
 FILTER_CYCLES = {
     "runs": ("all", "active", "completed", "failed"),
@@ -69,6 +77,8 @@ class ResearchCopilotTUI:
     """Stateful, testable terminal dashboard."""
 
     snapshot_loader: Callable[[], DashboardSnapshot] = build_dashboard_snapshot
+    time_source: Callable[[], float] = time.monotonic
+    timestamp_source: Callable[[], str] = lambda: datetime.now().strftime("%H:%M:%S")
 
     def __post_init__(self) -> None:
         self.screen_index = 0
@@ -91,6 +101,15 @@ class ResearchCopilotTUI:
         self.logs_modal_title = ""
         self.logs_modal_stdout = ""
         self.logs_modal_stderr = ""
+        self.viewport_width: int | None = None
+        self.viewport_height: int | None = None
+        self.auto_refresh_enabled = True
+        self.auto_refresh_interval_seconds = DEFAULT_AUTO_REFRESH_INTERVAL_SECONDS
+        self.refresh_in_progress = False
+        self.last_refresh_started_at: float | None = None
+        self.last_refresh_completed_at: float | None = None
+        self.last_refresh_label = "never"
+        self.last_refresh_error = ""
         self.snapshot = self.snapshot_loader()
         self.refresh()
 
@@ -104,19 +123,7 @@ class ResearchCopilotTUI:
         return panes[self.pane_indexes[self.current_screen] % len(panes)]
 
     def refresh(self) -> DashboardSnapshot:
-        self.snapshot = self.snapshot_loader()
-        self.selected_job_index = self._bounded_index(self.selected_job_index, len(self.snapshot.jobs))
-        self.selected_experiment_index = self._bounded_index(
-            self.selected_experiment_index, len(self.snapshot.experiments)
-        )
-        self.selected_insight_index = self._bounded_index(
-            self.selected_insight_index, len(self.snapshot.insights)
-        )
-        self.selected_paper_index = self._bounded_index(self.selected_paper_index, len(self.snapshot.papers))
-        self.selected_context_index = self._bounded_index(
-            self.selected_context_index, len(self.snapshot.context_entries)
-        )
-        return self.snapshot
+        return self._perform_refresh(raise_on_error=True)
 
     def set_screen(self, name: str) -> None:
         self.screen_index = SCREEN_ORDER.index(name)
@@ -226,6 +233,8 @@ class ResearchCopilotTUI:
             self.move_selection(1)
         elif normalized in {"k", "up", "prev"}:
             self.move_selection(-1)
+        elif normalized == "a":
+            self.auto_refresh_enabled = not self.auto_refresh_enabled
         elif normalized in {"r", "refresh"}:
             self.refresh()
         elif normalized in {"enter", "o"}:
@@ -242,6 +251,8 @@ class ResearchCopilotTUI:
 
     def run(self, console: Console | None = None) -> None:
         console = console or Console()
+        self.viewport_width = console.size.width
+        self.viewport_height = console.size.height
         self.refresh()
         if not console.is_interactive:
             console.print(self.render_static())
@@ -249,9 +260,12 @@ class ResearchCopilotTUI:
 
         with console.screen(style="black on default"):
             while True:
+                self.viewport_width = console.size.width
+                self.viewport_height = console.size.height
+                self._maybe_auto_refresh()
                 console.clear()
                 console.print(self.render())
-                key = self._read_key()
+                key = self._read_key(timeout=self._next_poll_timeout())
                 if not self.handle_key(key):
                     break
 
@@ -272,6 +286,20 @@ class ResearchCopilotTUI:
         )
 
     def _render_header(self) -> RenderableType:
+        if self._is_short_layout():
+            summary = Text(
+                "Active runs: "
+                f"{self.snapshot.active_jobs} • "
+                f"Tracked runs: {len(self.snapshot.jobs)} • "
+                f"Experiments: {len(self.snapshot.experiments)} • "
+                f"Insights: {len(self.snapshot.insights)} • "
+                f"Papers: {len(self.snapshot.papers)}",
+                style="bold cyan",
+            )
+            subtitle = (
+                f"schema {self.snapshot.schema_version} • {self.snapshot.snapshot_state}"
+            )
+            return Panel(summary, title="Research Copilot", subtitle=subtitle)
         metrics = Columns(
             [
                 self._metric_panel("Active runs", str(self.snapshot.active_jobs), "cyan"),
@@ -352,6 +380,51 @@ class ResearchCopilotTUI:
         return layout
 
     def _render_runs_screen(self) -> RenderableType:
+        if self._is_short_layout():
+            return Group(
+                Panel(
+                    self._render_jobs_table(limit=8),
+                    title="Runs",
+                    border_style=self._pane_style("runs"),
+                ),
+                Panel(self._render_compact_job_detail(self._selected_job()), title="Run focus"),
+            )
+        if self._is_narrow_layout():
+            return Group(
+                Panel(
+                    self._render_jobs_table(limit=20),
+                    title="Runs",
+                    border_style=self._pane_style("runs"),
+                ),
+                Panel(self._render_job_detail(self._selected_job()), title="Run detail"),
+                Panel(
+                    self._render_links_summary(self._selected_job_entity_id()),
+                    title="Linked research",
+                    border_style=self._pane_style("links"),
+                ),
+            )
+        if self._is_medium_layout():
+            layout = Layout()
+            layout.split_column(Layout(name="top", ratio=2), Layout(name="bottom", ratio=1))
+            layout["top"].split_row(
+                Layout(
+                    Panel(
+                        self._render_jobs_table(limit=20),
+                        title="Runs",
+                        border_style=self._pane_style("runs"),
+                    ),
+                    ratio=2,
+                ),
+                Layout(Panel(self._render_job_detail(self._selected_job()), title="Run detail"), ratio=3),
+            )
+            layout["bottom"].update(
+                Panel(
+                    self._render_links_summary(self._selected_job_entity_id()),
+                    title="Linked research",
+                    border_style=self._pane_style("links"),
+                )
+            )
+            return layout
         layout = Layout()
         layout.split_row(
             Layout(
@@ -375,6 +448,60 @@ class ResearchCopilotTUI:
         return layout
 
     def _render_experiments_screen(self) -> RenderableType:
+        if self._is_short_layout():
+            return Group(
+                Panel(
+                    self._render_experiments_table(limit=8),
+                    title="Experiments",
+                    border_style=self._pane_style("experiments"),
+                ),
+                Panel(
+                    self._render_compact_experiment_detail(self._selected_experiment()),
+                    title="Experiment focus",
+                ),
+            )
+        if self._is_narrow_layout():
+            return Group(
+                Panel(
+                    self._render_experiments_table(limit=20),
+                    title="Experiments",
+                    border_style=self._pane_style("experiments"),
+                ),
+                Panel(
+                    self._render_experiment_detail(self._selected_experiment()),
+                    title="Experiment detail",
+                ),
+                Panel(
+                    self._render_links_summary(self._selected_experiment_entity_id()),
+                    title="Linked research",
+                    border_style=self._pane_style("links"),
+                ),
+            )
+        if self._is_medium_layout():
+            layout = Layout()
+            layout.split_column(Layout(name="top", ratio=2), Layout(name="bottom", ratio=1))
+            layout["top"].split_row(
+                Layout(
+                    Panel(
+                        self._render_experiments_table(limit=20),
+                        title="Experiments",
+                        border_style=self._pane_style("experiments"),
+                    ),
+                    ratio=2,
+                ),
+                Layout(
+                    Panel(self._render_experiment_detail(self._selected_experiment()), title="Experiment detail"),
+                    ratio=3,
+                ),
+            )
+            layout["bottom"].update(
+                Panel(
+                    self._render_links_summary(self._selected_experiment_entity_id()),
+                    title="Linked research",
+                    border_style=self._pane_style("links"),
+                )
+            )
+            return layout
         layout = Layout()
         layout.split_row(
             Layout(
@@ -398,6 +525,66 @@ class ResearchCopilotTUI:
         return layout
 
     def _render_research_screen(self) -> RenderableType:
+        if self._is_short_layout():
+            current_pane = self.current_pane
+            return Group(
+                Panel(
+                    Text(
+                        "Tab panes to switch: Insights • Papers • Context",
+                        style="bold cyan",
+                    ),
+                    title="Research navigation",
+                    border_style="cyan",
+                ),
+                Panel(
+                    self._render_current_research_table(limit=6),
+                    title=f"Research list — {current_pane.title()}",
+                    border_style=self._pane_style(current_pane),
+                ),
+                Panel(self._render_compact_research_detail(), title="Research focus"),
+            )
+        if self._is_narrow_layout():
+            current_pane = self.current_pane
+            return Group(
+                Panel(
+                    Text(
+                        "Tab panes to switch: Insights • Papers • Context",
+                        style="bold cyan",
+                    ),
+                    title="Research navigation",
+                    border_style="cyan",
+                ),
+                Panel(
+                    self._render_current_research_table(),
+                    title=f"Research list — {current_pane.title()}",
+                    border_style=self._pane_style(current_pane),
+                ),
+                Panel(self._render_selected_research_detail(), title="Research detail"),
+            )
+        if self._is_medium_layout():
+            current_pane = self.current_pane
+            layout = Layout()
+            layout.split_column(Layout(name="top", ratio=2), Layout(name="bottom", ratio=1))
+            layout["top"].split_row(
+                Layout(
+                    Panel(
+                        self._render_current_research_table(),
+                        title=f"Research list — {current_pane.title()}",
+                        border_style=self._pane_style(current_pane),
+                    ),
+                    ratio=3,
+                ),
+                Layout(
+                    Panel(
+                        self._render_research_pane_overview(),
+                        title="Pane guide",
+                        border_style="cyan",
+                    ),
+                    ratio=2,
+                ),
+            )
+            layout["bottom"].update(Panel(self._render_selected_research_detail(), title="Research detail"))
+            return layout
         layout = Layout()
         layout.split_column(Layout(name="lists", ratio=2), Layout(name="detail", ratio=1))
         layout["lists"].split_row(
@@ -522,7 +709,7 @@ class ResearchCopilotTUI:
             Text(experiment.results_summary),
         )
 
-    def _render_insights_table(self) -> RenderableType:
+    def _render_insights_table(self, limit: int | None = None) -> RenderableType:
         insights = self._visible_insights()
         if not insights:
             return Text("No insights captured yet.", style="dim")
@@ -531,12 +718,13 @@ class ResearchCopilotTUI:
         table.add_column("Title", style="bold")
         table.add_column("Category")
         table.add_column("Confidence", justify="right")
-        for index, insight in enumerate(insights):
+        visible = insights if limit is None else insights[:limit]
+        for index, insight in enumerate(visible):
             selected = "▶" if index == self.selected_insight_index else " "
             table.add_row(selected, insight.title, insight.category, insight.confidence)
         return table
 
-    def _render_papers_table(self) -> RenderableType:
+    def _render_papers_table(self, limit: int | None = None) -> RenderableType:
         papers = self._visible_papers()
         if not papers:
             return Text("No saved papers yet.", style="dim")
@@ -545,7 +733,8 @@ class ResearchCopilotTUI:
         table.add_column("Title", style="bold")
         table.add_column("Authors")
         table.add_column("Year", width=6)
-        for index, paper in enumerate(papers):
+        visible = papers if limit is None else papers[:limit]
+        for index, paper in enumerate(visible):
             selected = "▶" if index == self.selected_paper_index else " "
             authors = ", ".join(paper.authors[:2]) if paper.authors else "—"
             if len(paper.authors) > 2:
@@ -553,7 +742,7 @@ class ResearchCopilotTUI:
             table.add_row(selected, paper.title, authors, paper.year)
         return table
 
-    def _render_context_table(self) -> RenderableType:
+    def _render_context_table(self, limit: int | None = None) -> RenderableType:
         context_entries = self._visible_context_entries()
         if not context_entries:
             return Text("No research context stored yet.", style="dim")
@@ -562,7 +751,8 @@ class ResearchCopilotTUI:
         table.add_column("Key", style="bold")
         table.add_column("Type")
         table.add_column("Value")
-        for index, context in enumerate(context_entries):
+        visible = context_entries if limit is None else context_entries[:limit]
+        for index, context in enumerate(visible):
             selected = "▶" if index == self.selected_context_index else " "
             value = context.value[:48] + ("…" if len(context.value) > 48 else "")
             table.add_row(selected, context.key, context.context_type, value)
@@ -652,6 +842,7 @@ class ResearchCopilotTUI:
             Text("l open full logs on runs/experiments"),
             Text("Ctrl+P open action palette"),
             Text("g open links modal"),
+            Text("a toggle auto-refresh"),
             Text("e / p / i / c jump to linked experiment / papers / insights / context"),
             Text("r refresh"),
             Text("q close help or exit"),
@@ -697,6 +888,7 @@ class ResearchCopilotTUI:
     def _render_footer(self) -> RenderableType:
         selected = self._focus_label()
         search_hint = ""
+        command_hint = COMMAND_HINT
         if self.input_mode == "search":
             search_hint = f" • search> {self.input_buffer}"
         else:
@@ -707,8 +899,16 @@ class ResearchCopilotTUI:
             search_hint = f" • filter: {filter_mode} • sort: {sort_mode}"
             if query:
                 search_hint += f" • query: {query}"
+        if self._is_narrow_layout() or self._is_short_layout():
+            command_hint = COMPACT_COMMAND_HINT
+        auto_state = "on" if self.auto_refresh_enabled else "off"
+        refresh_state = "error" if self.last_refresh_error else ("refreshing" if self.refresh_in_progress else "idle")
         return Panel(
-            Text(f"{COMMAND_HINT} • focus: {selected}{search_hint}", style="bold cyan"),
+            Text(
+                f"{command_hint} • focus: {selected}{search_hint} • auto: {auto_state} "
+                f"({self.auto_refresh_interval_seconds:.0f}s) • updated: {self.last_refresh_label} • {refresh_state}",
+                style="bold cyan",
+            ),
             border_style="cyan",
         )
 
@@ -884,6 +1084,155 @@ class ResearchCopilotTUI:
 
     def _focus_label(self) -> str:
         return f"{self.current_screen}/{self.current_pane}"
+
+    def _truncate_inline(self, value: str, limit: int = 96) -> str:
+        return value if len(value) <= limit else value[: limit - 1] + "…"
+
+    def _viewport_dimensions(self) -> tuple[int, int]:
+        if self.viewport_width is not None and self.viewport_height is not None:
+            return self.viewport_width, self.viewport_height
+        fallback = shutil.get_terminal_size((120, 40))
+        return fallback.columns, fallback.lines
+
+    def _is_narrow_layout(self) -> bool:
+        width, _ = self._viewport_dimensions()
+        return width < NARROW_WIDTH
+
+    def _is_medium_layout(self) -> bool:
+        width, _ = self._viewport_dimensions()
+        return NARROW_WIDTH <= width < MEDIUM_WIDTH
+
+    def _is_short_layout(self) -> bool:
+        _, height = self._viewport_dimensions()
+        return height < SHORT_HEIGHT
+
+    def _render_current_research_table(self, limit: int | None = None) -> RenderableType:
+        pane = self.current_pane
+        if pane == "papers":
+            return self._render_papers_table(limit=limit)
+        if pane == "context":
+            return self._render_context_table(limit=limit)
+        return self._render_insights_table(limit=limit)
+
+    def _render_research_pane_overview(self) -> RenderableType:
+        rows = Table.grid(expand=True)
+        rows.add_row(
+            Text(f"Insights: {len(self.snapshot.insights)}", style=self._pane_style("insights"))
+        )
+        rows.add_row(
+            Text(f"Papers: {len(self.snapshot.papers)}", style=self._pane_style("papers"))
+        )
+        rows.add_row(
+            Text(
+                f"Context: {len(self.snapshot.context_entries)}",
+                style=self._pane_style("context"),
+            )
+        )
+        rows.add_row(Text("Use Tab / Shift+Tab to switch the active research pane.", style="dim"))
+        return rows
+
+    def _perform_refresh(self, *, raise_on_error: bool) -> DashboardSnapshot:
+        if self.refresh_in_progress:
+            return self.snapshot
+        self.refresh_in_progress = True
+        self.last_refresh_started_at = self.time_source()
+        try:
+            self.snapshot = self.snapshot_loader()
+            self.selected_job_index = self._bounded_index(self.selected_job_index, len(self.snapshot.jobs))
+            self.selected_experiment_index = self._bounded_index(
+                self.selected_experiment_index, len(self.snapshot.experiments)
+            )
+            self.selected_insight_index = self._bounded_index(
+                self.selected_insight_index, len(self.snapshot.insights)
+            )
+            self.selected_paper_index = self._bounded_index(self.selected_paper_index, len(self.snapshot.papers))
+            self.selected_context_index = self._bounded_index(
+                self.selected_context_index, len(self.snapshot.context_entries)
+            )
+            self.last_refresh_completed_at = self.time_source()
+            self.last_refresh_label = self.timestamp_source()
+            self.last_refresh_error = ""
+            return self.snapshot
+        except Exception as exc:
+            self.last_refresh_error = str(exc)
+            if raise_on_error:
+                raise
+            return self.snapshot
+        finally:
+            self.refresh_in_progress = False
+
+    def _next_poll_timeout(self) -> float | None:
+        if not self.auto_refresh_enabled:
+            return None
+        if self.last_refresh_completed_at is None:
+            return 0.0
+        elapsed = self.time_source() - self.last_refresh_completed_at
+        return max(0.0, self.auto_refresh_interval_seconds - elapsed)
+
+    def _maybe_auto_refresh(self) -> bool:
+        if not self.auto_refresh_enabled or self.refresh_in_progress:
+            return False
+        if self.last_refresh_completed_at is None:
+            self._perform_refresh(raise_on_error=False)
+            return True
+        if (self.time_source() - self.last_refresh_completed_at) < self.auto_refresh_interval_seconds:
+            return False
+        self._perform_refresh(raise_on_error=False)
+        return True
+
+    def _render_compact_job_detail(self, job: JobRecord | None) -> RenderableType:
+        if job is None:
+            return Text("No run selected.", style="dim")
+        return Group(
+            Text(f"{job.name}", style="bold"),
+            Text(
+                f"{job.status} • GPU {job.gpus} • {format_timestamp(job.submitted_at)}",
+                style="dim",
+            ),
+            Text(self._truncate_inline(job.log_tail or "(no stdout)")),
+        )
+
+    def _render_compact_experiment_detail(self, experiment: ExperimentRecord | None) -> RenderableType:
+        if experiment is None:
+            return Text("No experiment selected.", style="dim")
+        return Group(
+            Text(experiment.name, style="bold"),
+            Text(
+                f"{experiment.status} • {experiment.dataset or '—'} • {experiment.model_type or '—'}",
+                style="dim",
+            ),
+            Text(self._truncate_inline(experiment.hypothesis or experiment.description or "No notes yet.")),
+            Text(self._truncate_inline(experiment.results_summary or "No result snapshot yet."), style="dim"),
+        )
+
+    def _render_compact_research_detail(self) -> RenderableType:
+        if self.current_pane == "papers":
+            paper = self._selected_paper()
+            if paper is None:
+                return Text("No paper selected.", style="dim")
+            authors = ", ".join(paper.authors[:2]) if paper.authors else "—"
+            return Group(
+                Text(paper.title, style="bold"),
+                Text(f"{authors} • {paper.year}", style="dim"),
+                Text(self._truncate_inline(paper.relevance_notes or "No relevance notes stored.")),
+            )
+        if self.current_pane == "context":
+            context = self._selected_context()
+            if context is None:
+                return Text("No context selected.", style="dim")
+            return Group(
+                Text(context.key, style="bold"),
+                Text(f"{context.context_type}", style="dim"),
+                Text(self._truncate_inline(context.value)),
+            )
+        insight = self._selected_insight()
+        if insight is None:
+            return Text("No insight selected.", style="dim")
+        return Group(
+            Text(insight.title, style="bold"),
+            Text(f"{insight.category} • {insight.confidence}", style="dim"),
+            Text(self._truncate_inline(insight.content)),
+        )
 
     def _pane_style(self, pane: str) -> str:
         return "cyan" if self.current_pane == pane else "grey35"
@@ -1138,10 +1487,16 @@ class ResearchCopilotTUI:
     def _bounded_index(self, value: int, length: int) -> int:
         return min(value, length - 1) if length else 0
 
-    def _read_key(self) -> str:
+    def _read_key(self, timeout: float | None = None) -> str:
         try:
             import msvcrt
 
+            if timeout is not None:
+                deadline = self.time_source() + timeout
+                while not msvcrt.kbhit():
+                    if self.time_source() >= deadline:
+                        return ""
+                    time.sleep(0.05)
             first = msvcrt.getwch()
             if first in {"\x00", "\xe0"}:
                 second = msvcrt.getwch()
@@ -1167,6 +1522,10 @@ class ResearchCopilotTUI:
             original = termios.tcgetattr(stream)
             try:
                 tty.setraw(stream)
+                if timeout is not None:
+                    ready, _, _ = select.select([sys.stdin], [], [], timeout)
+                    if not ready:
+                        return ""
                 first = sys.stdin.read(1)
                 if first == "\x1b":
                     ready, _, _ = select.select([sys.stdin], [], [], 0.01)

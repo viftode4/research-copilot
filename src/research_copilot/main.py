@@ -347,10 +347,10 @@ def _load_mcp_server_entrypoint() -> Any:
             "MCP server transport is not available in this build yet."
         ) from exc
 
-    serve = getattr(module, "serve_stdio_server", None)
+    serve = getattr(module, "serve_stdio", None) or getattr(module, "serve_stdio_server", None)
     if serve is None:
         raise click.ClickException(
-            "Expected `serve_stdio_server` in research_copilot.integrations.mcp.server."
+            "Expected `serve_stdio` in research_copilot.integrations.mcp.server."
         )
     return serve
 

@@ -38,7 +38,7 @@ def test_default_cli_invocation_renders_tui_snapshot():
 
     assert result.exit_code == 0
     assert "Research Copilot" in result.output
-    assert "Terminal workflow dashboard" in result.output
+    assert "schema 1.0.0" in result.output
     assert "No runs yet" in result.output
 
 

@@ -13,7 +13,7 @@ from research_copilot.integrations.mcp.server import (
     ResearchCopilotMcpServer,
     read_framed_message,
     run_stdio_server,
-    write_framed_message,
+    write_delimited_message,
 )
 from research_copilot.integrations.mcp.tools import call_tool
 from research_copilot.mcp_servers.knowledge_base import _store
@@ -44,9 +44,25 @@ def _collect_framed_messages(raw: bytes) -> list[dict[str, object]]:
         messages.append(payload)
 
 
+def test_read_framed_message_accepts_newline_delimited_jsonrpc() -> None:
+    stream = BytesIO(b'{"jsonrpc":"2.0","id":1,"method":"ping"}\n')
+
+    payload = read_framed_message(stream)
+
+    assert payload == {"jsonrpc": "2.0", "id": 1, "method": "ping"}
+
+
+def test_write_delimited_message_emits_single_json_line() -> None:
+    stream = BytesIO()
+
+    write_delimited_message(stream, {"jsonrpc": "2.0", "id": 1, "result": {"ok": True}})
+
+    assert stream.getvalue() == b'{"jsonrpc":"2.0","id":1,"result":{"ok":true}}\n'
+
+
 def test_stdio_server_initializes_and_lists_only_the_approved_v1_tools() -> None:
     input_stream = BytesIO()
-    write_framed_message(
+    write_delimited_message(
         input_stream,
         {
             "jsonrpc": "2.0",
@@ -55,7 +71,7 @@ def test_stdio_server_initializes_and_lists_only_the_approved_v1_tools() -> None
             "params": {"protocolVersion": MCP_PROTOCOL_VERSION, "capabilities": {}, "clientInfo": {"name": "pytest", "version": "0"}},
         },
     )
-    write_framed_message(
+    write_delimited_message(
         input_stream,
         {
             "jsonrpc": "2.0",
@@ -63,7 +79,7 @@ def test_stdio_server_initializes_and_lists_only_the_approved_v1_tools() -> None
             "params": {},
         },
     )
-    write_framed_message(
+    write_delimited_message(
         input_stream,
         {
             "jsonrpc": "2.0",
@@ -77,7 +93,11 @@ def test_stdio_server_initializes_and_lists_only_the_approved_v1_tools() -> None
 
     asyncio.run(run_stdio_server(input_stream=input_stream, output_stream=output_stream))
 
-    messages = _collect_framed_messages(output_stream.getvalue())
+    messages = [
+        json.loads(line)
+        for line in output_stream.getvalue().decode("utf-8").splitlines()
+        if line.strip()
+    ]
     assert messages[0]["result"]["protocolVersion"] == MCP_PROTOCOL_VERSION
     assert messages[0]["result"]["serverInfo"]["name"] == "research-copilot"
 
