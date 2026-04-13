@@ -5,8 +5,8 @@ Research Copilot is a terminal-first local research loop.
 It gives you:
 - a read-only TUI for observing runs, experiments, research context, and runtime state
 - workflow commands as the primary action surface for triage, experiments, review, and next-step planning
-- `workflow autonomous-*` as the canonical autonomy surface
-- `runtime codex-*` as advanced expert supervision for a live Codex pane
+- `workflow autonomous-start` / `workflow autonomous-continue` as the canonical managed autonomy path
+- `runtime codex-*` as advanced supervision / recovery for a managed Codex brain
 
 State lives in `.research-copilot/` inside the workspace.
 
@@ -63,17 +63,18 @@ Recommended next action after onboarding:
 research-copilot workflow triage --json
 ```
 
-## Canonical Workflow Autonomy
+## Canonical Managed Autonomy
 
-Start the persistent workflow autonomy loop:
+Start the persistent managed autonomy loop:
 
 ```bash
-research-copilot workflow autonomous-run --json
+research-copilot workflow autonomous-start --json
 ```
 
-Inspect or control that workflow runtime:
+Continue/reconcile or inspect that managed runtime:
 
 ```bash
+research-copilot workflow autonomous-continue --json
 research-copilot workflow autonomous-status --json
 research-copilot workflow autonomous-stop --owner-token <token> --json
 research-copilot workflow autonomous-resume --owner-token <token> --json
@@ -81,7 +82,7 @@ research-copilot workflow autonomous-resume --owner-token <token> --json
 
 ## Advanced Codex Runtime Supervision
 
-Use `runtime codex-*` when you already have a live Codex pane and need expert supervision/steering:
+Use `runtime codex-*` when you already have a managed Codex brain and need expert supervision or recovery:
 
 Attach a Codex pane:
 
@@ -163,6 +164,7 @@ The TUI is read-only.
 
 It shows:
 - live runtime state
+- brain driver and runtime health
 - freshness
 - last action
 - latest summary
@@ -181,11 +183,12 @@ For overflow content:
 ```bash
 research-copilot workflow onboard --json
 research-copilot workflow triage --json
+research-copilot workflow autonomous-start --json
+research-copilot workflow autonomous-continue --json
 research-copilot workflow research-context "<query>" --json
 research-copilot workflow run-experiment --command "<local command>" --json
 research-copilot workflow review-results <experiment-id> --json
 research-copilot workflow next-step <experiment-id> --json
-research-copilot workflow autonomous-run --json
 ```
 
 See `docs/cli-workflows.md` for the wording contract and `docs/demo-runbook.md` for the demo path.
@@ -204,6 +207,7 @@ research-copilot runtime --help
 
 - The TUI is read-only. Mutating actions still go through CLI workflow/runtime commands.
 - The live Codex runtime can continue autonomously, but it still depends on the Codex pane accepting and following the injected bounded-turn prompt.
+- Managed Codex autonomy now depends on one active runtime generation, explicit turn reporting, and may degrade to watchdog-supported mode when reports stop arriving.
 - The supervisor currently targets tmux panes only.
 - Steering is applied as text injected into the registered Codex pane; it is not a model-native control channel.
 - The runtime/dashboard path is local and single-user. It is not a multi-user remote control plane.

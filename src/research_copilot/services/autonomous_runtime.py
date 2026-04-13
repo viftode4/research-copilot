@@ -24,6 +24,7 @@ from research_copilot.research_state import (
     load_onboarding_contract,
     mark_autonomous_runtime_stale,
     mint_owner_token,
+    get_research_root,
     save_autonomous_runtime,
     utc_now_iso,
 )
@@ -118,6 +119,21 @@ def _public_runtime(runtime: dict[str, Any], *, include_owner_token: bool = Fals
     if not include_owner_token:
         payload.pop("owner_token", None)
     return payload
+
+
+def _runtime_health_state(runtime: dict[str, Any]) -> str:
+    status = _string(runtime.get("status")).lower()
+    if status == "archived":
+        return "archived"
+    if status == "stale":
+        return "stale"
+    if autonomous_runtime_is_stale(runtime):
+        return "stale"
+    if status in {"stopped", "failed", "completed"}:
+        return "archived"
+    if _string(runtime.get("last_report_at")):
+        return "managed_healthy"
+    return "managed_degraded"
 
 
 def _persist_runtime(
@@ -568,6 +584,10 @@ def _runtime_response(runtime: dict[str, Any], *, include_owner_token: bool = Fa
     payload = _public_runtime(runtime, include_owner_token=include_owner_token)
     return {
         "run_id": _string(runtime.get("run_id")),
+        "runtime_id": _string(runtime.get("runtime_id") or runtime.get("run_id")),
+        "generation_id": _string(runtime.get("generation_id")),
+        "brain_driver": _string(runtime.get("brain_driver")),
+        "health_state": _string(runtime.get("health_state")),
         "status": _string(runtime.get("status")),
         "summary": _string(runtime.get("summary")),
         "owner_token": _string(runtime.get("owner_token")) if include_owner_token else "",
@@ -595,6 +615,7 @@ def _build_runtime_contract(
     goal: str,
     success_criteria: str,
     profile_name: str,
+    brain_driver: str,
     autonomy_level: str,
     allowed_actions: list[str],
     constraints: list[str],
@@ -612,6 +633,11 @@ def _build_runtime_contract(
     runtime = {
         "schema_version": "1.0",
         "run_id": run_id,
+        "runtime_id": run_id,
+        "workspace_id": str(get_research_root()),
+        "generation_id": uuid4().hex,
+        "brain_driver": _string(brain_driver) or "workflow",
+        "health_state": "managed_degraded",
         "status": "running",
         "goal": goal,
         "profile_name": profile_name,
@@ -631,10 +657,14 @@ def _build_runtime_contract(
         "last_action": {},
         "last_action_status": "",
         "last_experiment_id": "",
+        "experiment_id": "",
+        "turn_id": "",
         "owner_token": owner_token,
         "owner_pid": None,
         "lease_expires_at": "",
         "last_heartbeat_at": "",
+        "last_report_at": "",
+        "last_watchdog_at": "",
         "updated_at": timestamp,
         "started_at": timestamp,
         "completed_at": "",
@@ -660,6 +690,7 @@ def _build_runtime_contract(
 async def autonomous_run(
     *,
     goal: str = "",
+    brain_driver: str = "",
     success_criteria: str = "",
     profile_name: str = "",
     active_profile: str = "",
@@ -714,6 +745,7 @@ async def autonomous_run(
         goal=resolved_goal,
         success_criteria=resolved_success,
         profile_name=resolved_profile,
+        brain_driver=_string(brain_driver) or "workflow",
         autonomy_level=resolved_autonomy,
         allowed_actions=resolved_allowed,
         constraints=resolved_constraints,
@@ -728,9 +760,76 @@ async def autonomous_run(
     saved = _persist_runtime(
         runtime,
         event_type="runtime.created",
-        event_details={"status": "running", "phase": "launching"},
+        event_details={
+            "status": "running",
+            "phase": "launching",
+            "brain_driver": runtime["brain_driver"],
+            "generation_id": runtime["generation_id"],
+        },
     )
     return _runtime_response(saved, include_owner_token=True)
+
+
+async def autonomous_continue(
+    *,
+    run_id: str = "",
+    runtime_id: str = "",
+    goal: str = "",
+    brain_driver: str = "",
+    success_criteria: str = "",
+    profile_name: str = "",
+    active_profile: str = "",
+    autonomy_level: str = "",
+    allowed_actions: list[str] | None = None,
+    constraints: list[str] | None = None,
+    stop_conditions: list[str] | None = None,
+    command_template: str = "",
+    template_vars: dict[str, Any] | None = None,
+    action_envelope: dict[str, Any] | None = None,
+    max_iterations: int | None = None,
+    created_by: str = "codex",
+    actor_type: str = "codex",
+    actor: str = "",
+) -> dict[str, Any]:
+    """Continue a healthy runtime, resume a stale one, or start a new runtime."""
+
+    resolved_run_id = _string(run_id or runtime_id)
+    runtime = _mark_stale_if_needed(_load_runtime_for_run(resolved_run_id))
+    if runtime and autonomous_runtime_is_active(runtime) and not autonomous_runtime_is_stale(runtime):
+        runtime["summary"] = runtime.get("summary") or "Autonomous runtime already active."
+        return _runtime_response(runtime, include_owner_token=True)
+
+    if runtime and autonomous_runtime_is_resumable(runtime):
+        owner_token = _string(runtime.get("owner_token"))
+        if owner_token:
+            return await autonomous_resume(
+                run_id=_string(runtime.get("run_id")),
+                runtime_id=_string(runtime.get("runtime_id")),
+                owner_token=owner_token,
+                token=owner_token,
+                created_by=created_by,
+                actor_type=actor_type,
+                actor=actor,
+            )
+
+    return await autonomous_run(
+        goal=goal,
+        brain_driver=brain_driver,
+        success_criteria=success_criteria,
+        profile_name=profile_name,
+        active_profile=active_profile,
+        autonomy_level=autonomy_level,
+        allowed_actions=allowed_actions,
+        constraints=constraints,
+        stop_conditions=stop_conditions,
+        command_template=command_template,
+        template_vars=template_vars,
+        action_envelope=action_envelope,
+        max_iterations=max_iterations,
+        created_by=created_by,
+        actor_type=actor_type,
+        actor=actor,
+    )
 
 
 async def autonomous_status(*, run_id: str = "", runtime_id: str = "") -> dict[str, Any]:
@@ -982,8 +1081,12 @@ async def run_autonomous_worker(
             runtime["last_action"] = {"action": action, "inputs": inputs, "reason": reason}
             runtime["last_action_status"] = action_status
             runtime["last_experiment_id"] = experiment_id or _string(runtime.get("last_experiment_id"))
+            runtime["experiment_id"] = runtime["last_experiment_id"]
+            runtime["turn_id"] = f"{_string(runtime.get('generation_id'))}:{runtime['iteration']}"
+            runtime["last_report_at"] = utc_now_iso()
             runtime["summary"] = reason
             runtime["consecutive_failures"] = 0 if action_status != "failed" else 1
+            runtime["health_state"] = _runtime_health_state(runtime)
             next_snapshot = build_workflow_snapshot(max_items=5)
             next_decision = _decide_next_action(runtime, next_snapshot)
             runtime["action_envelope"] = _update_action_envelope(
@@ -1199,6 +1302,7 @@ async def _run_iteration(
             )
         runtime["status"] = "running"
         runtime["current_phase"] = "waiting"
+        runtime["health_state"] = _runtime_health_state(runtime)
         return _persist_runtime(
             runtime,
             event_type="action.completed",
@@ -1232,6 +1336,7 @@ async def _run_iteration(
             )
         runtime["status"] = "running"
         runtime["current_phase"] = "waiting"
+        runtime["health_state"] = _runtime_health_state(runtime)
         return _persist_runtime(
             runtime,
             event_type="action.failed",

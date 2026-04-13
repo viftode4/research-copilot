@@ -124,6 +124,57 @@ async def test_autonomous_resume_clears_previous_owner_instance_id(monkeypatch, 
 
 
 @pytest.mark.asyncio
+async def test_autonomous_start_creates_single_active_generation(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    module = _load_runtime_module()
+
+    payload = await module.autonomous_run(
+        goal="proof",
+        brain_driver="codex",
+        profile_name="goal-chaser",
+        command_template='python -c "print(1)"',
+        max_iterations=2,
+        actor_type="assistant",
+    )
+
+    runtime = load_autonomous_runtime()
+
+    assert payload["status"] == "running"
+    assert runtime["generation_id"]
+    assert runtime["brain_driver"] == "codex"
+    assert runtime["health_state"] == "managed_degraded"
+    assert runtime["runtime_id"] == runtime["run_id"]
+    assert load_autonomous_runtime_history(runtime["run_id"]) == {}
+
+
+@pytest.mark.asyncio
+async def test_autonomous_continue_reuses_healthy_active_generation(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    module = _load_runtime_module()
+
+    created = await module.autonomous_run(
+        goal="proof",
+        brain_driver="workflow",
+        profile_name="goal-chaser",
+        command_template='python -c "print(1)"',
+        max_iterations=2,
+        actor_type="assistant",
+    )
+    active = load_autonomous_runtime()
+    active["last_report_at"] = "2026-04-13T00:00:10+00:00"
+    active["health_state"] = "managed_healthy"
+    save_autonomous_runtime(active)
+
+    payload = await module.autonomous_continue(run_id=created["run_id"], brain_driver="workflow")
+    current = load_autonomous_runtime()
+
+    assert payload["run_id"] == created["run_id"]
+    assert current["generation_id"] == active["generation_id"]
+    assert current["brain_driver"] == "workflow"
+    assert current["status"] == "running"
+
+
+@pytest.mark.asyncio
 async def test_autonomous_worker_preserves_stop_requested_during_inflight_action(
     monkeypatch,
     tmp_path,

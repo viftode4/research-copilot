@@ -158,6 +158,11 @@ class FullLogRecord:
 
 @dataclass(frozen=True)
 class RuntimeRecord:
+    runtime_id: str
+    workspace_id: str
+    generation_id: str
+    brain_driver: str
+    health_state: str
     source: str
     session_id: str
     run_id: str
@@ -172,9 +177,13 @@ class RuntimeRecord:
     last_action: str
     last_action_status: str
     last_experiment_id: str
+    experiment_id: str
+    turn_id: str
     started_at: str
     updated_at: str
     last_heartbeat_at: str
+    last_report_at: str
+    last_watchdog_at: str
     lease_expires_at: str
     completed_at: str
     stop_requested_at: str
@@ -374,6 +383,11 @@ def _build_runtime_record(snapshot: dict[str, Any]) -> RuntimeRecord | None:
         freshness_state = "terminal"
 
     return RuntimeRecord(
+        runtime_id=str(runtime.get("runtime_id") or ""),
+        workspace_id=str(runtime.get("workspace_id") or ""),
+        generation_id=str(runtime.get("generation_id") or ""),
+        brain_driver=str(runtime.get("brain_driver") or ""),
+        health_state=str(runtime.get("health_state") or ""),
         source=str(runtime.get("source") or ""),
         session_id=str(runtime.get("session_id") or ""),
         run_id=str(runtime.get("run_id") or ""),
@@ -388,9 +402,13 @@ def _build_runtime_record(snapshot: dict[str, Any]) -> RuntimeRecord | None:
         last_action=str(runtime.get("last_action") or ""),
         last_action_status=str(runtime.get("last_action_status") or ""),
         last_experiment_id=str(runtime.get("last_experiment_id") or ""),
+        experiment_id=str(runtime.get("experiment_id") or ""),
+        turn_id=str(runtime.get("turn_id") or ""),
         started_at=str(runtime.get("started_at") or ""),
         updated_at=updated_at,
         last_heartbeat_at=heartbeat_at,
+        last_report_at=str(runtime.get("last_report_at") or ""),
+        last_watchdog_at=str(runtime.get("last_watchdog_at") or ""),
         lease_expires_at=lease_expires_at,
         completed_at=completed_at,
         stop_requested_at=str(runtime.get("stop_requested_at") or ""),

@@ -28,12 +28,14 @@ def _workflow_command(name: str):
 
 
 @pytest.fixture(autouse=True)
-def clean_state(monkeypatch) -> None:
+def clean_state(monkeypatch, tmp_path) -> None:
     _mock_jobs.clear()
     for key in _store:
         _store[key].clear()
     for variable in ("RC_RESEARCH_ROOT", "RC_WORKING_DIR", "RC_GLOBAL_HOME"):
         monkeypatch.delenv(variable, raising=False)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("RC_WORKING_DIR", str(tmp_path))
     yield
     _mock_jobs.clear()
     for key in _store:
@@ -327,7 +329,7 @@ def test_status_and_top_level_help_reflect_terminal_first_surface(monkeypatch, t
     help_result = runner.invoke(cli, ["--help"])
 
     assert status_result.exit_code == 0
-    assert "Open 'research-copilot' for the read-only TUI" in status_result.output
+    assert "Open 'research-copilot' for read-only observation" in status_result.output
     assert "Workflow Snapshot" in status_result.output
     assert "Onboarding:" in status_result.output
     assert "research-copilot init" in status_result.output
@@ -380,7 +382,7 @@ def test_status_surfaces_saved_onboarding_contract(monkeypatch, tmp_path):
     assert "Probe random-data baseline behavior" in status_result.output
     assert "goal-chaser" in status_result.output
     assert "Recommended next action: research-copilot workflow triage" in status_result.output
-    assert "read-only TUI" in status_result.output
+    assert "read-only observation" in status_result.output
 
 
 
@@ -413,10 +415,75 @@ def test_workflow_help_lists_autonomous_lifecycle_commands_when_runtime_lane_is_
     result = runner.invoke(cli, ["workflow", "--help"])
 
     assert result.exit_code == 0
+    assert "autonomous-start" in result.output
+    assert "autonomous-continue" in result.output
     assert "autonomous-run" in result.output
     assert "autonomous-status" in result.output
     assert "autonomous-stop" in result.output
     assert "autonomous-resume" in result.output
+
+
+def test_workflow_autonomous_start_reports_generation_and_brain_driver(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(main_module, "_launch_autonomous_worker", lambda payload: None)
+    runner = CliRunner()
+
+    result = runner.invoke(
+        cli,
+        [
+            "workflow",
+            "autonomous-start",
+            "--goal",
+            "proof",
+            "--brain-driver",
+            "codex",
+            "--profile",
+            "goal-chaser",
+            "--command-template",
+            'python -c "print(1)"',
+            "--json",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)["data"]
+    assert payload["brain_driver"] == "codex"
+    assert payload["generation_id"]
+    assert payload["runtime_id"] == payload["run_id"]
+
+
+def test_workflow_autonomous_continue_reuses_healthy_runtime_instead_of_starting_new_one(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(main_module, "_launch_autonomous_worker", lambda payload: None)
+    save_autonomous_runtime(
+        {
+            "schema_version": "1.0",
+            "run_id": "run-1",
+            "runtime_id": "run-1",
+            "workspace_id": str(tmp_path / ".research-copilot"),
+            "generation_id": "gen-continue",
+            "brain_driver": "workflow",
+            "health_state": "managed_healthy",
+            "status": "running",
+            "goal": "proof",
+            "profile_name": "goal-chaser",
+            "iteration": 1,
+            "updated_at": "2026-04-13T00:00:00+00:00",
+            "started_at": "2026-04-13T00:00:00+00:00",
+            "last_heartbeat_at": "2026-04-13T00:00:00+00:00",
+            "last_report_at": "2026-04-13T00:00:00+00:00",
+            "owner_token": "secret-token",
+        }
+    )
+    runner = CliRunner()
+
+    result = runner.invoke(cli, ["workflow", "autonomous-continue", "--run-id", "run-1", "--json"])
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)["data"]
+    assert payload["run_id"] == "run-1"
+    assert payload["generation_id"] == "gen-continue"
+    assert payload["brain_driver"] == "workflow"
 
 
 def test_workflow_triage_human_output_uses_recommended_next_action(monkeypatch):
@@ -536,7 +603,7 @@ def test_runtime_help_lists_codex_runtime_commands():
     result = runner.invoke(cli, ["runtime", "--help"])
 
     assert result.exit_code == 0
-    assert "Advanced runtime supervision for Codex-managed sessions." in result.output
+    assert "Advanced supervision and recovery for managed Codex sessions." in result.output
     assert "codex-attach" in result.output
     assert "codex-status" in result.output
     assert "codex-report" in result.output

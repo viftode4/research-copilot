@@ -761,6 +761,31 @@ def _status_response(
     pending_nudges = _load_pending_nudges(session_id) if session_id and include_nudges else []
     pending_nudge_count = len(pending_nudges) if include_nudges else _nudge_count(session_id)
     freshness_state, freshness_label = _freshness_for_payload(merged)
+    derived_health_state = _string(merged.get("health_state"))
+    if not derived_health_state:
+        if _string(merged.get("status")).lower() in CODEX_TERMINAL_STATUSES:
+            derived_health_state = "archived"
+        elif freshness_state == "fresh" and _string(merged.get("last_report_at")):
+            derived_health_state = "managed_healthy"
+        elif _string(merged.get("last_watchdog_at")):
+            derived_health_state = "watchdog_supported"
+        elif freshness_state in {"lagging", "stale"}:
+            derived_health_state = "managed_degraded"
+        else:
+            derived_health_state = "managed_degraded"
+
+    derived_health_state = _string(merged.get("health_state"))
+    if not derived_health_state:
+        if _string(merged.get("status")).lower() in CODEX_TERMINAL_STATUSES:
+            derived_health_state = "archived"
+        elif freshness_state == "fresh" and _string(merged.get("last_report_at")):
+            derived_health_state = "managed_healthy"
+        elif _string(merged.get("last_watchdog_at")):
+            derived_health_state = "watchdog_supported"
+        elif freshness_state in {"lagging", "stale"}:
+            derived_health_state = "managed_degraded"
+        else:
+            derived_health_state = "managed_degraded"
 
     response = dict(merged)
     response["available"] = True
@@ -770,6 +795,8 @@ def _status_response(
     response["freshness_label"] = freshness_label
     response["is_stale"] = freshness_state == "stale"
     response["is_lagging"] = freshness_state == "lagging"
+    response["health_state"] = derived_health_state
+    response["health_state"] = derived_health_state
     if include_nudges:
         response["pending_nudges"] = pending_nudges
     if accepted is not None:
@@ -846,6 +873,11 @@ def attach_codex_session(
     payload = {
         **current,
         "schema_version": _string(current.get("schema_version")) or "1.0",
+        "runtime_id": resolved_session_id,
+        "workspace_id": resolved_workspace or _string(current.get("workspace_id")),
+        "generation_id": _string(current.get("generation_id")) or uuid4().hex,
+        "brain_driver": "codex",
+        "health_state": _string(current.get("health_state")) or "managed_degraded",
         "brain_type": "codex",
         "session_id": resolved_session_id,
         "status": _string(status) or _string(current.get("status")) or "running",
@@ -868,13 +900,17 @@ def attach_codex_session(
         "last_action": current.get("last_action") or "",
         "last_action_status": _string(current.get("last_action_status")),
         "last_experiment_id": _string(current.get("last_experiment_id")),
+        "experiment_id": _string(current.get("experiment_id")) or _string(current.get("last_experiment_id")),
         "last_review_id": _string(current.get("last_review_id")),
         "last_context_update": _string(current.get("last_context_update")),
+        "turn_id": _string(current.get("turn_id")),
         "profile_name": _string(profile_name) or _string(current.get("profile_name")),
         "autonomy_level": _string(autonomy_level) or _string(current.get("autonomy_level")),
         "started_at": _string(current.get("started_at")) or timestamp,
         "updated_at": timestamp,
         "last_heartbeat_at": _newer_timestamp(_string(current.get("last_heartbeat_at")), timestamp),
+        "last_report_at": _string(current.get("last_report_at")),
+        "last_watchdog_at": _string(current.get("last_watchdog_at")),
         "completed_at": _string(current.get("completed_at")),
         "stop_requested_at": _string(current.get("stop_requested_at")),
         "stop_reason": _string(current.get("stop_reason")),
@@ -1005,6 +1041,7 @@ def ingest_codex_turn_report(
     duplicate = accepted_event is not None
     if apply_to_active:
         current["current_turn"] = int(turn_number)
+        current["turn_id"] = f"{_string(current.get('generation_id'))}:{turn_number}"
         current["current_turn_state"] = _string(turn_state) or _string(current.get("current_turn_state")) or "thinking"
         current["current_phase"] = current["current_turn_state"]
         current["summary"] = _string(summary)
@@ -1015,13 +1052,19 @@ def ingest_codex_turn_report(
         } if normalized_action or normalized_artifacts else current.get("last_action") or ""
         current["last_action_status"] = _string(status) or _string(current.get("last_action_status"))
         current["last_experiment_id"] = _string(experiment_id) or _string(current.get("last_experiment_id"))
+        current["experiment_id"] = _string(experiment_id) or _string(current.get("experiment_id")) or _string(current.get("last_experiment_id"))
         current["last_review_id"] = _string(review_id) or _string(current.get("last_review_id"))
         current["last_context_update"] = _string(context_update) or _string(current.get("last_context_update"))
         current["status"] = _string(status) or _string(current.get("status")) or "running"
+        current["health_state"] = "managed_healthy"
     current["updated_at"] = _newer_timestamp(_string(current.get("updated_at")), timestamp)
     current["last_heartbeat_at"] = _newer_timestamp(
         _string(current.get("last_heartbeat_at")),
         heartbeat_timestamp,
+    )
+    current["last_report_at"] = _newer_timestamp(
+        _string(current.get("last_report_at")),
+        timestamp,
     )
     if pane_id or window_name or session_name or workspace:
         transport_payload = _transport_payload(
@@ -1226,7 +1269,10 @@ def apply_codex_nudges(
     drained = drain_codex_nudges(session_id=resolved_session_id, limit=len(pending))
     current = _load_session_payload(resolved_session_id)
     current["last_steering_applied_at"] = utc_now_iso()
+    current["last_watchdog_at"] = current["last_steering_applied_at"]
     current["updated_at"] = _string(current.get("last_steering_applied_at"))
+    if not _string(current.get("last_report_at")):
+        current["health_state"] = "watchdog_supported"
     save_codex_active_session(current)
     append_codex_runtime_event(
         resolved_session_id,

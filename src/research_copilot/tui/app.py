@@ -906,7 +906,7 @@ class ResearchCopilotTUI:
         if runtime is None:
             return Group(
                 Text(
-                    "No live runtime detected. Start workflow autonomous-run for the canonical autonomy path.",
+                    "No live runtime detected. Start workflow autonomous-start for the canonical managed autonomy path.",
                     style="dim",
                 ),
                 Text(
@@ -942,6 +942,10 @@ class ResearchCopilotTUI:
             compact_lines: list[RenderableType] = [
                 header,
                 freshness,
+                Text(
+                    f"Driver: {runtime.brain_driver or '—'} • Health: {runtime.health_state or '—'}",
+                    style="dim",
+                ),
                 Text(
                     f"Iteration: {iteration_value} • Profile: {runtime.profile_name or '—'}",
                     style="dim",
@@ -981,7 +985,11 @@ class ResearchCopilotTUI:
         info.add_row("Status", Text(self._runtime_status_label(runtime.status), style=self._status_style(runtime.status)))
         info.add_row("Freshness", Text(runtime.freshness_label, style=self._freshness_style(runtime)))
         info.add_row("Source", runtime.source or "—")
+        info.add_row("Driver", runtime.brain_driver or "—")
+        info.add_row("Health", runtime.health_state or "—")
         info.add_row("Session", session_label)
+        if runtime.generation_id:
+            info.add_row("Generation", runtime.generation_id[:12])
         if runtime.session_name and runtime.session_name != session_label:
             info.add_row("tmux session", runtime.session_name)
         if runtime.window_name:
@@ -997,6 +1005,10 @@ class ResearchCopilotTUI:
         info.add_row("Operator", runtime.operator_mode or "—")
         info.add_row("Pending nudges", str(runtime.pending_nudge_count))
         info.add_row("Heartbeat", format_timestamp(runtime.last_heartbeat_at))
+        if runtime.last_report_at:
+            info.add_row("Last report", format_timestamp(runtime.last_report_at))
+        if runtime.last_watchdog_at:
+            info.add_row("Last watchdog", format_timestamp(runtime.last_watchdog_at))
         info.add_row("Updated", format_timestamp(runtime.updated_at))
         info.add_row("Last action", self._truncate_inline(last_action, limit=48))
         if runtime.last_action_status:
@@ -1009,6 +1021,8 @@ class ResearchCopilotTUI:
         details: list[RenderableType] = [info]
         if runtime.goal:
             details.extend([Text("\nGoal", style="bold"), Text(runtime.goal)])
+        if summary_line and summary_line != last_action:
+            details.extend([Text("\nSummary", style="bold"), Text(summary_line)])
         if runtime.workspace:
             details.extend([Text("\nWorkspace", style="bold"), Text(runtime.workspace, style="dim")])
         if stop_note:
@@ -1340,6 +1354,11 @@ class ResearchCopilotTUI:
         )
         freshness_state = str(runtime.get("freshness_state") or "unknown")
         return RuntimeRecord(
+            runtime_id=str(runtime.get("runtime_id") or ""),
+            workspace_id=str(runtime.get("workspace_id") or ""),
+            generation_id=str(runtime.get("generation_id") or ""),
+            brain_driver=str(runtime.get("brain_driver") or ""),
+            health_state=str(runtime.get("health_state") or ""),
             source=str(runtime.get("source") or ""),
             session_id=str(runtime.get("session_id") or ""),
             run_id=str(runtime.get("run_id") or ""),
@@ -1358,9 +1377,13 @@ class ResearchCopilotTUI:
             last_action=str(runtime.get("last_action") or ""),
             last_action_status=str(runtime.get("last_action_status") or ""),
             last_experiment_id=str(runtime.get("last_experiment_id") or ""),
+            experiment_id=str(runtime.get("experiment_id") or ""),
+            turn_id=str(runtime.get("turn_id") or ""),
             started_at=str(runtime.get("started_at") or ""),
             updated_at=str(runtime.get("updated_at") or ""),
             last_heartbeat_at=str(runtime.get("last_heartbeat_at") or ""),
+            last_report_at=str(runtime.get("last_report_at") or ""),
+            last_watchdog_at=str(runtime.get("last_watchdog_at") or ""),
             lease_expires_at=str(runtime.get("lease_expires_at") or ""),
             completed_at=str(runtime.get("completed_at") or ""),
             stop_requested_at=str(runtime.get("stop_requested_at") or ""),
@@ -1448,8 +1471,8 @@ class ResearchCopilotTUI:
     def _runtime_recommended_action(self, runtime: RuntimeRecord | None) -> tuple[str, str]:
         if runtime is None:
             return (
-                "research-copilot workflow autonomous-run --json",
-                "workflow autonomous-* is the canonical autonomy surface; runtime codex-* is advanced expert supervision.",
+                "research-copilot workflow autonomous-start --json",
+                "workflow autonomous-start / autonomous-continue are the canonical managed autonomy path; runtime codex-* is advanced supervision / recovery.",
             )
         if runtime.source == "autonomous":
             if runtime.run_id:

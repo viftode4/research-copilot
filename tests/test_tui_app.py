@@ -679,14 +679,16 @@ def test_runtime_card_shows_summary_separately_from_last_action():
         },
     )
     app = ResearchCopilotTUI(snapshot_loader=lambda: snapshot)
+    app.viewport_width = 200
+    app.viewport_height = 80
 
-    rendered = _render_text(app.render())
+    rendered = _render_text(app._render_runtime_card(compact=False))
 
-    assert "Last action: review-results" in rendered
-    assert "Summary: First monitored Codex turn." in rendered
-    assert "Goal: Live monitor validation" in rendered
-    assert "Pending nudges: 2" in rendered
-    assert "Operator: steerable" in rendered
+    assert "Last action" in rendered
+    assert "review-results" in rendered
+    assert "First monitored Codex turn." in rendered
+    assert "Pending nudges" in rendered
+    assert "steerable" in rendered
 
 
 def test_runtime_card_prefers_session_identity_and_shows_tmux_metadata():
@@ -700,6 +702,11 @@ def test_runtime_card_prefers_session_identity_and_shows_tmux_metadata():
         **{
             runtime_field: {
                 "source": "codex",
+                "runtime_id": "runtime-1",
+                "workspace_id": "workspace-1",
+                "generation_id": "gen-1234567890ab",
+                "brain_driver": "codex",
+                "health_state": "managed_degraded",
                 "session_id": "test-research-live",
                 "session_name": "omx-research-copilot-main",
                 "window_name": "python",
@@ -712,6 +719,8 @@ def test_runtime_card_prefers_session_identity_and_shows_tmux_metadata():
                 "last_action": "review-results",
                 "summary": "First monitored Codex turn.",
                 "last_heartbeat_at": "2026-04-13T01:05:00+00:00",
+                "last_report_at": "2026-04-13T01:06:00+00:00",
+                "last_watchdog_at": "2026-04-13T01:07:00+00:00",
             }
         },
     )
@@ -723,6 +732,11 @@ def test_runtime_card_prefers_session_identity_and_shows_tmux_metadata():
 
     assert "Session" in rendered
     assert "test-research-live" in rendered
+    assert "Driver" in rendered
+    assert "codex" in rendered
+    assert "Health" in rendered
+    assert "managed_degraded" in rendered
+    assert "Generation" in rendered
     assert "tmux session" in rendered
     assert "omx-research-copilot-main" in rendered
     assert "Window" in rendered
@@ -732,6 +746,10 @@ def test_runtime_card_prefers_session_identity_and_shows_tmux_metadata():
     assert "Transport" in rendered
     assert "tmux-pane" in rendered
     assert "ctrl+u/d scroll" in rendered
+    app.handle_key("\x04")
+    scrolled = _render_text(app._render_runtime_card(compact=False))
+    assert "Last report" in scrolled
+    assert "Last watchdog" in scrolled
     app.handle_key("\x04")
     scrolled = _render_text(app._render_runtime_card(compact=False))
     assert "Workspace" in scrolled
@@ -776,4 +794,4 @@ def test_runtime_empty_state_mentions_codex_attach_and_autonomous_run():
 
     assert "No live runtime detected." in rendered
     assert "runtime codex-attach" in rendered
-    assert "workflow autonomous-run" in rendered
+    assert "workflow autonomous-start" in rendered

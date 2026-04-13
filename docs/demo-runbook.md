@@ -6,11 +6,11 @@ This runbook is the operator script for the UI/UX sprint demo.
 
 1. **TUI** (`research-copilot`) — primary observation surface
 2. **Workflow CLI** (`research-copilot workflow ...`) — primary action surface
-3. **Runtime Codex CLI** (`research-copilot runtime codex-*`) — advanced expert supervision only
+3. **Runtime Codex CLI** (`research-copilot runtime codex-*`) — advanced supervision / recovery only
 
 ## Demo goal
 
-Show that a human can read the TUI, pick up the recommended next action, and complete the action through the workflow CLI without ambiguity.
+Show that a human can read the TUI, pick up the recommended next action, and start or reconcile autonomous research through the workflow CLI without ambiguity.
 
 ## Recommended demo sequence
 
@@ -88,11 +88,12 @@ research-copilot workflow next-step <experiment-id> --json
 Only show this if the audience asks about expert supervision:
 
 ```bash
-research-copilot workflow autonomous-run --json
+research-copilot workflow autonomous-start --brain-driver codex --json
+research-copilot workflow autonomous-continue --json
 research-copilot runtime codex-attach --session-id demo --pane-id %42 --json
 ```
 
 Narrate:
 
-- `workflow autonomous-*` is the canonical autonomy path
-- `runtime codex-*` is the advanced live-supervision path
+- `workflow autonomous-start` / `autonomous-continue` are the canonical managed autonomy path
+- `runtime codex-*` is the advanced supervision / recovery path

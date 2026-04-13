@@ -16,8 +16,8 @@ Research Copilot keeps a split interface:
 - `research-copilot ... --json` is the stable agent-facing surface and never opens the TUI.
 - Named workflows package common multi-step research-ops tasks into explicit commands.
 - `research-copilot workflow onboard` persists the current single-user operating contract before autonomous work begins.
-- `research-copilot workflow autonomous-*` is the canonical autonomy surface.
-- `research-copilot runtime codex-*` is advanced expert supervision for a live Codex session, not the default operator path.
+- `research-copilot workflow autonomous-start` / `autonomous-continue` are the canonical managed autonomy path.
+- `research-copilot runtime codex-*` is advanced supervision / recovery for a managed Codex session, not the default operator path.
 - Ultrawork profiles package repeatable parallel execution patterns with named lanes and expected outputs.
 
 ## Control-plane hierarchy
@@ -25,8 +25,8 @@ Research Copilot keeps a split interface:
 Use the surfaces in this order:
 
 1. **TUI (`research-copilot`)** — primary observation surface, always read-only
-2. **Workflow CLI (`research-copilot workflow ...`)** — primary action surface
-3. **Runtime Codex CLI (`research-copilot runtime codex-*`)** — advanced expert supervision only
+2. **Workflow CLI (`research-copilot workflow ...`)** — primary action surface, including managed autonomy start/continue
+3. **Runtime Codex CLI (`research-copilot runtime codex-*`)** — advanced supervision / recovery only
 
 Two wording rules should stay stable across help, docs, and demos:
 
@@ -92,6 +92,8 @@ Unless a section says otherwise, the examples below assume the workspace has alr
 | --- | --- | --- | --- |
 | `onboard` | Capture the current solo-user operating contract | `research-copilot workflow onboard ... [--json]` | Persisted goal, autonomy bounds, and next-step hints |
 | `onboard-show` | Review the saved contract | `research-copilot workflow onboard-show [--json]` | Current goal/profile plus suggested next commands |
+| `autonomous-start` | Start managed autonomy with the selected brain driver | `research-copilot workflow autonomous-start ... [--json]` | One active managed runtime created |
+| `autonomous-continue` | Reuse or reconcile managed autonomy safely | `research-copilot workflow autonomous-continue ... [--json]` | Healthy runtime reused or stale/orphaned runtime reconciled |
 | `triage` | Inspect current state quickly | `research-copilot workflow triage [--json]` | Current-state summary with blockers and the recommended next action |
 | `launch-experiment` | Register an experiment and submit a tracked job | `research-copilot workflow launch-experiment ... [--json]` | Experiment created, job submitted, tracking linked |
 | `monitor-run` | Follow a running job or experiment | `research-copilot workflow monitor-run <id> [--json]` | Fresh status, logs, and notable events |
@@ -105,7 +107,7 @@ Unless a section says otherwise, the examples below assume the workspace has alr
 
 ### `status` vs `triage`
 
-- `status` is the human-readable readiness screen.
+- `status` is the human-readable readiness screen plus active-runtime health.
 - `triage` is the machine-safe workflow summary and the place to fetch the recommended next action programmatically.
 
 ### `launch-experiment` vs `run-experiment`

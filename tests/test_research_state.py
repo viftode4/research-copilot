@@ -12,6 +12,7 @@ import pytest
 import research_copilot.research_state as research_state_module
 from research_copilot.research_state import (
     FileBackedCollection,
+    resolve_active_session,
     build_provenance,
     ensure_research_root,
     get_last_workspace,
@@ -19,6 +20,7 @@ from research_copilot.research_state import (
     get_research_root,
     load_onboarding_contract,
     load_recent_workspaces,
+    save_autonomous_runtime,
     process_is_running,
     remember_workspace,
     save_record,
@@ -239,6 +241,56 @@ def test_autonomous_runtime_is_stale_ignores_live_owner_with_future_lease() -> N
     }
 
     assert autonomous_runtime_is_stale(payload) is False
+
+
+def test_resolve_active_session_includes_runtime_schema_fields_for_autonomous_runtime(monkeypatch, tmp_path) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("RC_WORKING_DIR", str(tmp_path))
+    ensure_research_root()
+    save_autonomous_runtime(
+        {
+            "schema_version": "1.0",
+            "run_id": "auto-1",
+            "runtime_id": "auto-1",
+            "workspace_id": str(get_research_root()),
+            "generation_id": "gen-123",
+            "brain_driver": "workflow",
+            "health_state": "managed_degraded",
+            "brain_type": "autonomous",
+            "status": "running",
+            "goal": "Investigate drift",
+            "allowed_actions": ["run-experiment"],
+            "constraints": [],
+            "iteration": 2,
+            "summary": "Running bounded turn 2",
+            "last_action": {"action": "run-experiment"},
+            "last_action_status": "completed",
+            "last_experiment_id": "exp-2",
+            "experiment_id": "exp-2",
+            "turn_id": "gen-123:2",
+            "started_at": "2026-04-13T00:00:00+00:00",
+            "updated_at": "2026-04-13T00:00:10+00:00",
+            "last_heartbeat_at": "2026-04-13T00:00:10+00:00",
+            "last_report_at": "2026-04-13T00:00:10+00:00",
+            "last_watchdog_at": "",
+            "lease_expires_at": "2999-01-01T00:00:00+00:00",
+            "completed_at": "",
+            "stop_requested_at": "",
+            "stop_reason": "",
+            "consecutive_failures": 0,
+        }
+    )
+
+    resolved = resolve_active_session(persist=False)
+
+    assert resolved["runtime_id"] == "auto-1"
+    assert resolved["workspace_id"] == str(get_research_root())
+    assert resolved["generation_id"] == "gen-123"
+    assert resolved["brain_driver"] == "workflow"
+    assert resolved["health_state"] == "managed_degraded"
+    assert resolved["experiment_id"] == "exp-2"
+    assert resolved["turn_id"] == "gen-123:2"
+    assert resolved["last_report_at"] == "2026-04-13T00:00:10+00:00"
 
 
 def test_recent_workspace_registry_tracks_workspace_dirs_even_for_new_root(

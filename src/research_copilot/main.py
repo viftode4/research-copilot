@@ -99,12 +99,14 @@ warnings.filterwarnings("ignore", category=RequestsDependencyWarning)
 
 CLI_EPILOG = """
 Start with: research-copilot init
+Then: research-copilot workflow autonomous-start --json
 Solo proof: docs/seeded-solo-cli-scenario.md
 """
 
 WORKFLOW_EPILOG = """
 Start with: research-copilot init
-Then: research-copilot workflow triage --json
+Then: research-copilot workflow autonomous-start --json
+Continue with: research-copilot workflow autonomous-continue --json
 Solo proof: docs/seeded-solo-cli-scenario.md
 """
 
@@ -120,6 +122,11 @@ _AUTONOMOUS_START_CANDIDATES = (
     "autonomous_run",
     "start_autonomous_runtime",
     "start_runtime",
+)
+_AUTONOMOUS_CONTINUE_CANDIDATES = (
+    "autonomous_continue",
+    "continue_autonomous_runtime",
+    "continue_runtime",
 )
 _AUTONOMOUS_STATUS_CANDIDATES = (
     "autonomous_status",
@@ -222,7 +229,7 @@ def _guard_machine_mutation(as_json: bool) -> None:
 @click.option("--workspace", type=click.Path(file_okay=False, dir_okay=True, path_type=str), default=None, help="Optional workspace directory override.")
 @click.pass_context
 def cli(ctx: click.Context, workspace: str | None):
-    """Research Copilot — terminal workflow dashboard for ML research labs."""
+    """Research Copilot — terminal observation dashboard for managed research runtimes."""
     resolved_workspace, previous_workspace = _configure_workspace(workspace)
     ctx.call_on_close(lambda: _restore_workspace(previous_workspace))
     ctx.obj = {"workspace": resolved_workspace}
@@ -359,7 +366,10 @@ def status(as_json: bool):
             next_step = "research-copilot workflow onboard" if initialized else "research-copilot init"
         click.echo(f"  Recommended next action: {next_step}")
     click.echo()
-    click.echo("Open 'research-copilot' for the read-only TUI; use workflow commands for actions.")
+    click.echo(
+        "Open 'research-copilot' for read-only observation; use workflow autonomous-start / "
+        "autonomous-continue for managed autonomy and workflow commands for actions."
+    )
 
 
 def _run_async(coro: Any) -> Any:
@@ -735,7 +745,7 @@ def mcp_print_agents_snippet():
 
 @cli.group()
 def runtime():
-    """Advanced runtime supervision for Codex-managed sessions."""
+    """Advanced supervision and recovery for managed Codex sessions."""
 
 
 @runtime.command("codex-attach")
@@ -1715,8 +1725,66 @@ def workflow_next_step(experiment_id: str, as_json: bool):
     _emit_result(payload, as_json, "; ".join(payload["review"]["suggestions"]))
 
 
+def _start_autonomous_runtime_command(
+    *,
+    goal: str,
+    brain_driver: str,
+    profile_name: str,
+    success_criteria: str,
+    autonomy_level: str | None,
+    allowed_actions: tuple[str, ...],
+    constraints: tuple[str, ...],
+    stop_conditions: tuple[str, ...],
+    command_template: str,
+    template_vars: tuple[str, ...],
+    action_envelope: str,
+    max_iterations: int | None,
+    created_by: str,
+    actor_type: str,
+    as_json: bool,
+) -> None:
+    _guard_machine_mutation(as_json)
+    payload = _invoke_autonomous_runtime(
+        *_AUTONOMOUS_START_CANDIDATES,
+        goal=goal,
+        brain_driver=brain_driver,
+        success_criteria=success_criteria,
+        profile_name=profile_name,
+        active_profile=profile_name,
+        autonomy_level=autonomy_level or "",
+        allowed_actions=list(allowed_actions),
+        constraints=list(constraints),
+        stop_conditions=list(stop_conditions),
+        command_template=command_template,
+        template_vars=_parse_key_value_pairs(template_vars, option_name="template-var"),
+        action_envelope=_parse_json_object(action_envelope, option_name="action-envelope"),
+        max_iterations=max_iterations,
+        created_by=created_by,
+        actor_type=actor_type,
+        actor=actor_type,
+        spawn_worker=False,
+        launch_worker=False,
+        detach=False,
+    )
+    _launch_autonomous_worker(payload)
+    run_id = str(_runtime_value(payload, "run_id") or "unknown")
+    status_value = str(_runtime_value(payload, "status") or "running")
+    _emit_result(
+        payload,
+        as_json,
+        _runtime_summary(payload, f"Autonomous runtime {run_id} started with status {status_value}."),
+    )
+
+
 @workflow.command("autonomous-run")
 @click.option("--goal", default="", help="Optional goal override for the persistent runtime.")
+@click.option(
+    "--brain-driver",
+    type=click.Choice(["workflow", "codex"], case_sensitive=False),
+    default="workflow",
+    show_default=True,
+    help="Managed brain driver for the autonomous runtime.",
+)
 @click.option("--profile", "profile_name", default="", help="Optional autonomous profile override.")
 @click.option("--success-criteria", default="", help="Optional success criteria override.")
 @click.option(
@@ -1750,6 +1818,7 @@ def workflow_next_step(experiment_id: str, as_json: bool):
 @click.option("--json", "as_json", is_flag=True, help="Emit machine-readable JSON.")
 def workflow_autonomous_run(
     goal: str,
+    brain_driver: str,
     profile_name: str,
     success_criteria: str,
     autonomy_level: str | None,
@@ -1765,35 +1834,99 @@ def workflow_autonomous_run(
     as_json: bool,
 ):
     """Start the canonical autonomous workflow runtime and detach its worker."""
-    _guard_machine_mutation(as_json)
-    payload = _invoke_autonomous_runtime(
-        *_AUTONOMOUS_START_CANDIDATES,
+    _start_autonomous_runtime_command(
         goal=goal,
-        success_criteria=success_criteria,
+        brain_driver=brain_driver,
         profile_name=profile_name,
-        active_profile=profile_name,
-        autonomy_level=autonomy_level or "",
-        allowed_actions=list(allowed_actions),
-        constraints=list(constraints),
-        stop_conditions=list(stop_conditions),
+        success_criteria=success_criteria,
+        autonomy_level=autonomy_level,
+        allowed_actions=allowed_actions,
+        constraints=constraints,
+        stop_conditions=stop_conditions,
         command_template=command_template,
-        template_vars=_parse_key_value_pairs(template_vars, option_name="template-var"),
-        action_envelope=_parse_json_object(action_envelope, option_name="action-envelope"),
+        template_vars=template_vars,
+        action_envelope=action_envelope,
         max_iterations=max_iterations,
         created_by=created_by,
         actor_type=actor_type,
-        actor=actor_type,
-        spawn_worker=False,
-        launch_worker=False,
-        detach=False,
+        as_json=as_json,
     )
-    _launch_autonomous_worker(payload)
-    run_id = str(_runtime_value(payload, "run_id") or "unknown")
-    status_value = str(_runtime_value(payload, "status") or "running")
-    _emit_result(
-        payload,
-        as_json,
-        _runtime_summary(payload, f"Autonomous runtime {run_id} started with status {status_value}."),
+
+
+@workflow.command("autonomous-start")
+@click.option("--goal", default="", help="Optional goal override for the persistent runtime.")
+@click.option(
+    "--brain-driver",
+    type=click.Choice(["workflow", "codex"], case_sensitive=False),
+    default="workflow",
+    show_default=True,
+    help="Managed brain driver for the autonomous runtime.",
+)
+@click.option("--profile", "profile_name", default="", help="Optional autonomous profile override.")
+@click.option("--success-criteria", default="", help="Optional success criteria override.")
+@click.option(
+    "--autonomy-level",
+    type=click.Choice(["guided", "bounded", "aggressive"], case_sensitive=False),
+    default=None,
+    help="Optional autonomy-level override.",
+)
+@click.option("--allowed-action", "allowed_actions", multiple=True, help="Repeatable allowed action.")
+@click.option("--constraint", "constraints", multiple=True, help="Repeatable constraint.")
+@click.option("--stop-condition", "stop_conditions", multiple=True, help="Repeatable stop condition.")
+@click.option(
+    "--command-template",
+    default="",
+    help="Reusable local command template for persistent run-experiment steps.",
+)
+@click.option(
+    "--template-var",
+    "template_vars",
+    multiple=True,
+    help="Persisted template variable in KEY=VALUE form.",
+)
+@click.option(
+    "--action-envelope",
+    default="",
+    help="Optional JSON object override for the normalized executable action envelope.",
+)
+@click.option("--max-iterations", type=click.IntRange(1, None), default=None)
+@click.option("--created-by", default="human", show_default=True)
+@click.option("--actor-type", default="human", show_default=True)
+@click.option("--json", "as_json", is_flag=True, help="Emit machine-readable JSON.")
+def workflow_autonomous_start(
+    goal: str,
+    brain_driver: str,
+    profile_name: str,
+    success_criteria: str,
+    autonomy_level: str | None,
+    allowed_actions: tuple[str, ...],
+    constraints: tuple[str, ...],
+    stop_conditions: tuple[str, ...],
+    command_template: str,
+    template_vars: tuple[str, ...],
+    action_envelope: str,
+    max_iterations: int | None,
+    created_by: str,
+    actor_type: str,
+    as_json: bool,
+):
+    """Start the managed autonomous runtime using the selected brain driver."""
+    _start_autonomous_runtime_command(
+        goal=goal,
+        brain_driver=brain_driver,
+        profile_name=profile_name,
+        success_criteria=success_criteria,
+        autonomy_level=autonomy_level,
+        allowed_actions=allowed_actions,
+        constraints=constraints,
+        stop_conditions=stop_conditions,
+        command_template=command_template,
+        template_vars=template_vars,
+        action_envelope=action_envelope,
+        max_iterations=max_iterations,
+        created_by=created_by,
+        actor_type=actor_type,
+        as_json=as_json,
     )
 
 
@@ -1894,6 +2027,86 @@ def workflow_autonomous_resume(
         payload,
         as_json,
         _runtime_summary(payload, f"Autonomous runtime {resolved_run_id} resumed with status {status_value}."),
+    )
+
+
+@workflow.command("autonomous-continue")
+@click.option("--run-id", default="", help="Optional runtime id; defaults to the active runtime.")
+@click.option("--goal", default="", help="Optional goal override if a new runtime must be started.")
+@click.option(
+    "--brain-driver",
+    type=click.Choice(["workflow", "codex"], case_sensitive=False),
+    default="workflow",
+    show_default=True,
+    help="Managed brain driver when starting a new runtime.",
+)
+@click.option("--profile", "profile_name", default="", help="Optional autonomous profile override.")
+@click.option("--success-criteria", default="", help="Optional success criteria override.")
+@click.option(
+    "--autonomy-level",
+    type=click.Choice(["guided", "bounded", "aggressive"], case_sensitive=False),
+    default=None,
+    help="Optional autonomy-level override.",
+)
+@click.option("--allowed-action", "allowed_actions", multiple=True, help="Repeatable allowed action.")
+@click.option("--constraint", "constraints", multiple=True, help="Repeatable constraint.")
+@click.option("--stop-condition", "stop_conditions", multiple=True, help="Repeatable stop condition.")
+@click.option("--command-template", default="", help="Reusable local command template for persistent run-experiment steps.")
+@click.option("--template-var", "template_vars", multiple=True, help="Persisted template variable in KEY=VALUE form.")
+@click.option("--action-envelope", default="", help="Optional JSON object override for the normalized executable action envelope.")
+@click.option("--max-iterations", type=click.IntRange(1, None), default=None)
+@click.option("--created-by", default="human", show_default=True)
+@click.option("--actor-type", default="human", show_default=True)
+@click.option("--json", "as_json", is_flag=True, help="Emit machine-readable JSON.")
+def workflow_autonomous_continue(
+    run_id: str,
+    goal: str,
+    brain_driver: str,
+    profile_name: str,
+    success_criteria: str,
+    autonomy_level: str | None,
+    allowed_actions: tuple[str, ...],
+    constraints: tuple[str, ...],
+    stop_conditions: tuple[str, ...],
+    command_template: str,
+    template_vars: tuple[str, ...],
+    action_envelope: str,
+    max_iterations: int | None,
+    created_by: str,
+    actor_type: str,
+    as_json: bool,
+):
+    """Reuse a healthy runtime, reconcile a stale one, or start a managed runtime."""
+    _guard_machine_mutation(as_json)
+    payload = _invoke_autonomous_runtime(
+        *_AUTONOMOUS_CONTINUE_CANDIDATES,
+        run_id=run_id,
+        runtime_id=run_id,
+        goal=goal,
+        brain_driver=brain_driver,
+        success_criteria=success_criteria,
+        profile_name=profile_name,
+        active_profile=profile_name,
+        autonomy_level=autonomy_level or "",
+        allowed_actions=list(allowed_actions),
+        constraints=list(constraints),
+        stop_conditions=list(stop_conditions),
+        command_template=command_template,
+        template_vars=_parse_key_value_pairs(template_vars, option_name="template-var"),
+        action_envelope=_parse_json_object(action_envelope, option_name="action-envelope"),
+        max_iterations=max_iterations,
+        created_by=created_by,
+        actor_type=actor_type,
+        actor=actor_type,
+    )
+    if not _runtime_value(payload, "last_heartbeat_at"):
+        _launch_autonomous_worker(payload)
+    resolved_run_id = str(_runtime_value(payload, "run_id") or run_id or "active")
+    status_value = str(_runtime_value(payload, "status") or "running")
+    _emit_result(
+        payload,
+        as_json,
+        _runtime_summary(payload, f"Autonomous runtime {resolved_run_id} continued with status {status_value}."),
     )
 
 

@@ -70,6 +70,10 @@ def test_attach_codex_session_persists_active_transport_and_resolver(monkeypatch
     assert resolved["source"] == "codex"
     assert resolved["session_id"] == "codex-1"
     assert resolved["goal"] == "Investigate scheduler drift"
+    assert resolved["runtime_id"] == "codex-1"
+    assert resolved["brain_driver"] == "codex"
+    assert resolved["generation_id"]
+    assert resolved["health_state"] == "managed_degraded"
 
 
 def test_attach_codex_session_rejects_tmux_workspace_mismatch(monkeypatch, tmp_path) -> None:
@@ -117,6 +121,10 @@ def test_turn_report_ingestion_updates_active_session_and_summary(monkeypatch, t
     assert active["current_turn"] == 4
     assert active["last_summary"] == "Reviewed the latest experiment outputs."
     assert active["last_experiment_id"] == "exp-4"
+    assert active["experiment_id"] == "exp-4"
+    assert active["turn_id"].endswith(":4")
+    assert active["health_state"] == "managed_healthy"
+    assert active["last_report_at"]
     assert active["last_review_id"] == "rev-4"
     assert load_codex_turn_summary("codex-1", 4) == "Reviewed the latest experiment outputs."
     assert any(
@@ -234,6 +242,8 @@ def test_apply_codex_nudges_sends_to_tmux_pane_and_drains(monkeypatch, tmp_path)
 
     assert len(applied["applied"]) == 2
     assert status["pending_nudge_count"] == 0
+    assert load_codex_active_session()["last_watchdog_at"]
+    assert status["health_state"] in {"watchdog_supported", "managed_degraded", "managed_healthy"}
     assert any(args[:3] == ("send-keys", "-t", "%12") for args in sent)
     assert any("Need a tighter recap." in " ".join(args) for args in sent)
     assert any("Stop after this turn." in " ".join(args) for args in sent)
