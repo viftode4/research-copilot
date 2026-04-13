@@ -888,6 +888,7 @@ class ResearchCopilotTUI:
         freshness = Text(f"Freshness: {runtime.freshness_label}", style=self._freshness_style(runtime))
         last_action = runtime.last_action or runtime.summary or "No bounded action recorded yet."
         summary_line = runtime.summary.strip()
+        session_label = runtime.session_id or runtime.run_id or runtime.session_name or "—"
         stop_note = runtime.stop_reason or (
             "Graceful stop requested." if runtime.stop_requested_at and runtime.status == "stopping" else ""
         )
@@ -928,7 +929,15 @@ class ResearchCopilotTUI:
         info.add_row("Status", Text(self._runtime_status_label(runtime.status), style=self._status_style(runtime.status)))
         info.add_row("Freshness", Text(runtime.freshness_label, style=self._freshness_style(runtime)))
         info.add_row("Source", runtime.source or "—")
-        info.add_row("Session", runtime.run_id or "—")
+        info.add_row("Session", session_label)
+        if runtime.session_name and runtime.session_name != session_label:
+            info.add_row("tmux session", runtime.session_name)
+        if runtime.window_name:
+            info.add_row("Window", runtime.window_name)
+        if runtime.pane_id:
+            info.add_row("Pane", runtime.pane_id)
+        if runtime.transport:
+            info.add_row("Transport", runtime.transport)
         info.add_row("Phase", runtime.current_phase or "—")
         info.add_row("Iteration", iteration_value)
         info.add_row("Profile", runtime.profile_name or "—")
@@ -948,6 +957,8 @@ class ResearchCopilotTUI:
         details: list[RenderableType] = [info]
         if runtime.goal:
             details.extend([Text("\nGoal", style="bold"), Text(runtime.goal)])
+        if runtime.workspace:
+            details.extend([Text("\nWorkspace", style="bold"), Text(runtime.workspace, style="dim")])
         if stop_note:
             details.extend([Text("\nStop reason", style="bold red"), Text(stop_note, style="red")])
         return self._scroll_panel_content(Group(*details), "runtime_card")
@@ -1267,6 +1278,7 @@ class ResearchCopilotTUI:
         freshness_state = str(runtime.get("freshness_state") or "unknown")
         return RuntimeRecord(
             source=str(runtime.get("source") or ""),
+            session_id=str(runtime.get("session_id") or ""),
             run_id=str(runtime.get("run_id") or ""),
             status=status,
             current_phase=str(runtime.get("current_phase") or ""),
@@ -1293,6 +1305,11 @@ class ResearchCopilotTUI:
             consecutive_failures=int(runtime.get("consecutive_failures") or 0),
             operator_mode=str(runtime.get("operator_mode") or ""),
             pending_nudge_count=int(runtime.get("pending_nudge_count") or 0),
+            transport=str(runtime.get("transport") or ""),
+            pane_id=str(runtime.get("pane_id") or ""),
+            window_name=str(runtime.get("window_name") or ""),
+            session_name=str(runtime.get("session_name") or ""),
+            workspace=str(runtime.get("workspace") or ""),
             freshness_label=freshness_label,
             freshness_state=freshness_state,
             is_stale=bool(runtime.get("is_stale")) or status == "stale",

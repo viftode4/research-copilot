@@ -560,6 +560,55 @@ def test_runtime_card_shows_summary_separately_from_last_action():
     assert "Operator: steerable" in rendered
 
 
+def test_runtime_card_prefers_session_identity_and_shows_tmux_metadata():
+    runtime_field = _runtime_field_name()
+    if runtime_field is None:
+        pytest.skip("Runtime snapshot field is not available in this checkout yet.")
+
+    snapshot = _seeded_snapshot()
+    snapshot = replace(
+        snapshot,
+        **{
+            runtime_field: {
+                "source": "codex",
+                "session_id": "test-research-live",
+                "session_name": "omx-research-copilot-main",
+                "window_name": "python",
+                "pane_id": "%84",
+                "transport": "tmux-pane",
+                "workspace": "G:\\Projects\\test-research",
+                "status": "running",
+                "iteration": 2,
+                "current_phase": "thinking",
+                "last_action": "review-results",
+                "summary": "First monitored Codex turn.",
+                "last_heartbeat_at": "2026-04-13T01:05:00+00:00",
+            }
+        },
+    )
+    app = ResearchCopilotTUI(snapshot_loader=lambda: snapshot)
+    app.viewport_width = 120
+    app.viewport_height = 40
+
+    rendered = _render_text(app._render_runtime_card(compact=False))
+
+    assert "Session" in rendered
+    assert "test-research-live" in rendered
+    assert "tmux session" in rendered
+    assert "omx-research-copilot-main" in rendered
+    assert "Window" in rendered
+    assert "python" in rendered
+    assert "Pane" in rendered
+    assert "%84" in rendered
+    assert "Transport" in rendered
+    assert "tmux-pane" in rendered
+    assert "ctrl+u/d scroll" in rendered
+    app.handle_key("\x04")
+    scrolled = _render_text(app._render_runtime_card(compact=False))
+    assert "Workspace" in scrolled
+    assert "G:\\Projects\\test-research" in scrolled
+
+
 def test_research_detail_supports_scroll_paging():
     snapshot = _seeded_snapshot()
     long_content = "\n".join(f"detail line {index}" for index in range(60))

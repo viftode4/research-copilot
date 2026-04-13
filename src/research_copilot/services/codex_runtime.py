@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import subprocess
+import asyncio
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -14,6 +16,8 @@ from research_copilot.research_state import (
     archive_codex_active_session,
     append_codex_runtime_event,
     codex_runtime_nudges_queue_path,
+    mint_owner_token,
+    process_is_running,
     list_codex_runtime_events,
     load_codex_active_session,
     load_codex_runtime_history,
@@ -26,6 +30,8 @@ from research_copilot.research_state import (
 
 CODEX_LAGGING_THRESHOLD_SECONDS = 60
 CODEX_STALE_THRESHOLD_SECONDS = 180
+CODEX_SUPERVISOR_POLL_SECONDS = 2
+CODEX_SUPERVISOR_LEASE_SECONDS = 30
 CODEX_TERMINAL_STATUSES = frozenset({"completed", "failed", "stopped", "archived"})
 CODEX_STEERING_KINDS = frozenset(
     {"nudge", "pause", "resume", "stop_after_turn", "request_summary"}
@@ -66,6 +72,13 @@ def _parse_iso_timestamp(value: str) -> datetime | None:
         return datetime.fromisoformat(value.replace("Z", "+00:00"))
     except ValueError:
         return None
+
+
+def _iso_with_offset(timestamp: str, seconds: int) -> str:
+    parsed = _parse_iso_timestamp(timestamp)
+    if parsed is None:
+        parsed = datetime.now(timezone.utc)
+    return datetime.fromtimestamp(parsed.timestamp() + seconds, tz=timezone.utc).isoformat()
 
 
 def _relative_age_label(value: str, *, now: datetime | None = None) -> str:
@@ -142,6 +155,8 @@ def _run_tmux_command(*args: str) -> subprocess.CompletedProcess[str]:
         check=True,
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
     )
 
 
@@ -190,6 +205,320 @@ def _paths_compatible(expected: str, actual: str) -> bool:
     expected_token = str(expected_path).lower()
     actual_token = str(actual_path).lower()
     return actual_token.startswith(expected_token) or expected_token.startswith(actual_token)
+
+
+def _codex_supervisor_is_running(payload: dict[str, Any], *, now: str | None = None) -> bool:
+    pid = payload.get("supervisor_pid")
+    if not process_is_running(pid):
+        return False
+    lease_expires_at = _string(payload.get("supervisor_lease_expires_at"))
+    if not lease_expires_at:
+        return True
+    lease_deadline = _parse_iso_timestamp(lease_expires_at)
+    current = _parse_iso_timestamp(now or utc_now_iso())
+    if lease_deadline is None or current is None:
+        return True
+    return current < lease_deadline
+
+
+def _claim_codex_supervisor_lease(
+    payload: dict[str, Any],
+    *,
+    owner_token: str,
+    owner_instance_id: str,
+    owner_pid: int,
+    timestamp: str | None = None,
+    allow_takeover: bool = False,
+) -> dict[str, Any]:
+    if not owner_token:
+        raise ValueError("owner_token is required to claim the Codex supervisor lease.")
+    normalized = dict(payload)
+    existing_owner = _string(normalized.get("supervisor_owner_token"))
+    existing_instance = _string(normalized.get("supervisor_owner_instance_id"))
+    claimed_at = timestamp or utc_now_iso()
+    if existing_owner and existing_owner != owner_token and not allow_takeover and _codex_supervisor_is_running(normalized, now=claimed_at):
+        raise RuntimeError("Codex supervisor already has an active owner.")
+    if existing_owner == owner_token and existing_instance and existing_instance != owner_instance_id and _codex_supervisor_is_running(normalized, now=claimed_at):
+        raise RuntimeError("Codex supervisor is already bound to a different worker instance.")
+
+    normalized["supervisor_owner_token"] = owner_token
+    normalized["supervisor_owner_instance_id"] = owner_instance_id
+    normalized["supervisor_pid"] = int(owner_pid)
+    normalized["worker_started"] = True
+    normalized["last_supervisor_heartbeat_at"] = claimed_at
+    normalized["supervisor_lease_expires_at"] = (
+        datetime.fromtimestamp(
+            (_parse_iso_timestamp(claimed_at) or datetime.now(timezone.utc)).timestamp() + CODEX_SUPERVISOR_LEASE_SECONDS,
+            tz=timezone.utc,
+        ).isoformat()
+    )
+    normalized["updated_at"] = claimed_at
+    return normalized
+
+
+def _pane_tail_lines(pane_id: str, *, lines: int = 80) -> list[str]:
+    try:
+        output = _run_tmux_command("capture-pane", "-p", "-t", pane_id, "-S", str(-lines)).stdout
+    except subprocess.CalledProcessError:
+        return []
+    return (output or "").splitlines()
+
+
+def _codex_pane_waiting_for_input(pane_id: str) -> bool:
+    lines = [line.rstrip() for line in _pane_tail_lines(pane_id, lines=80) if line.strip()]
+    if not lines:
+        return False
+    recent = lines[-20:]
+    if any("Working (" in line for line in recent):
+        return False
+    return any(line.lstrip().startswith("›") for line in recent)
+
+
+def _codex_continue_prompt(payload: dict[str, Any]) -> str:
+    session_id = _string(payload.get("session_id"))
+    workspace = _string(payload.get("workspace"))
+    goal = _string(payload.get("goal"))
+    next_turn = (_optional_int(payload.get("current_turn")) or 0) + 1
+    return (
+        "Continue the autonomous research loop in this workspace. "
+        f"Goal: {goal or 'advance the current investigation'}. "
+        "Use the existing Research Copilot workflow commands to choose and execute the next best bounded step, "
+        "persist review/context/next-step updates, and finish the turn with a runtime report. "
+        f'End this bounded turn by running: python -m research_copilot.main --workspace "{workspace}" '
+        f'runtime codex-report --session-id {session_id} --turn-number {next_turn} '
+        '--summary "<summary>" --action "<main action>" --experiment-id "<experiment id if any>" --json'
+    )
+
+
+def _persist_codex_session(
+    payload: dict[str, Any],
+    *,
+    event_type: str = "",
+    event_details: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    saved = save_codex_active_session(payload)
+    session_id = _string(saved.get("session_id"))
+    if session_id and event_type:
+        append_codex_runtime_event(
+            session_id,
+            {"event_type": event_type, **dict(event_details or {})},
+        )
+    return saved
+
+
+def start_codex_supervisor(
+    *,
+    session_id: str,
+    pane_id: str = "",
+    goal: str = "",
+    workspace: str = "",
+    window_name: str = "",
+    session_name: str = "",
+    actor_type: str = "codex",
+) -> dict[str, Any]:
+    """Prepare a Codex session for detached autonomous supervision."""
+
+    payload = _load_session_payload(session_id)
+    resolved_goal = goal or (_string(payload.get("goal")) if payload else "")
+    resolved_workspace = workspace or (_string(payload.get("workspace")) if payload else "")
+    resolved_window_name = window_name or (_string(payload.get("window_name")) if payload else "")
+    resolved_session_name = session_name or (_string(payload.get("session_name")) if payload else "")
+    if pane_id:
+        payload = attach_codex_session(
+            session_id=session_id,
+            pane_id=pane_id,
+            goal=resolved_goal,
+            workspace=resolved_workspace,
+            window_name=resolved_window_name,
+            session_name=resolved_session_name,
+            operator_mode="hands_off",
+            actor_type=actor_type,
+        )
+    elif not payload:
+        raise ValueError("pane_id is required to start an unattached Codex supervisor.")
+    current = _load_session_payload(session_id)
+    if _codex_supervisor_is_running(current):
+        raise RuntimeError("Codex supervisor is already running for this session.")
+    current["status"] = "active"
+    current["operator_mode"] = "hands_off"
+    current["current_phase"] = "supervising"
+    current["completed_at"] = ""
+    current["stop_requested_at"] = ""
+    current["stop_reason"] = ""
+    current["worker_started"] = False
+    current["supervisor_owner_token"] = mint_owner_token()
+    current["supervisor_owner_instance_id"] = uuid4().hex
+    current["supervisor_pid"] = None
+    current["last_supervisor_heartbeat_at"] = ""
+    current["supervisor_lease_expires_at"] = ""
+    current_turn = _optional_int(current.get("current_turn")) or 0
+    current["supervisor_last_prompted_turn"] = current_turn - 1
+    current["supervisor_last_prompted_at"] = ""
+    current["updated_at"] = utc_now_iso()
+    saved = _persist_codex_session(
+        current,
+        event_type="codex.supervisor.started",
+        event_details={"operator_mode": "hands_off"},
+    )
+    response = _status_response(saved, include_nudges=True)
+    response["owner_token"] = _string(saved.get("supervisor_owner_token"))
+    return response
+
+
+def stop_codex_supervisor(
+    *,
+    session_id: str,
+    owner_token: str = "",
+    reason: str = "",
+) -> dict[str, Any]:
+    """Request a graceful stop for the Codex supervisor."""
+
+    current = _load_session_payload(session_id)
+    if not current:
+        raise ValueError(f"No Codex runtime session '{session_id}' was found.")
+    existing_owner = _string(current.get("supervisor_owner_token"))
+    if existing_owner and owner_token and existing_owner != owner_token:
+        raise ValueError("owner_token does not match the active Codex supervisor.")
+    current["stop_requested_at"] = utc_now_iso()
+    current["stop_reason"] = _string(reason) or "Stop requested by operator."
+    current["status"] = "stopping"
+    current["updated_at"] = _string(current.get("stop_requested_at"))
+    saved = _persist_codex_session(
+        current,
+        event_type="codex.supervisor.stop_requested",
+        event_details={"reason": current["stop_reason"]},
+    )
+    return _status_response(saved, include_nudges=True)
+
+
+def resume_codex_supervisor(
+    *,
+    session_id: str,
+    owner_token: str = "",
+) -> dict[str, Any]:
+    """Resume a stopped/idle Codex supervisor."""
+
+    current = _load_session_payload(session_id)
+    if not current:
+        raise ValueError(f"No Codex runtime session '{session_id}' was found.")
+    existing_owner = _string(current.get("supervisor_owner_token"))
+    if existing_owner and owner_token and existing_owner != owner_token:
+        raise ValueError("owner_token does not match the active Codex supervisor.")
+    if _codex_supervisor_is_running(current):
+        return _status_response(current, include_nudges=True)
+    current["status"] = "active"
+    current["operator_mode"] = "hands_off"
+    current["current_phase"] = "supervising"
+    current["stop_requested_at"] = ""
+    current["stop_reason"] = ""
+    current["worker_started"] = False
+    current["supervisor_owner_token"] = mint_owner_token()
+    current["supervisor_owner_instance_id"] = uuid4().hex
+    current["supervisor_pid"] = None
+    current["last_supervisor_heartbeat_at"] = ""
+    current["supervisor_lease_expires_at"] = ""
+    current_turn = _optional_int(current.get("current_turn")) or 0
+    current["supervisor_last_prompted_turn"] = current_turn - 1
+    current["supervisor_last_prompted_at"] = ""
+    current["updated_at"] = utc_now_iso()
+    saved = _persist_codex_session(
+        current,
+        event_type="codex.supervisor.resumed",
+    )
+    response = _status_response(saved, include_nudges=True)
+    response["owner_token"] = _string(saved.get("supervisor_owner_token"))
+    return response
+
+
+def run_codex_supervisor_iteration(
+    *,
+    session_id: str,
+    owner_token: str,
+    owner_instance_id: str,
+    owner_pid: int,
+) -> dict[str, Any]:
+    """Execute one Codex supervisor tick."""
+
+    current = _load_session_payload(session_id)
+    if not current:
+        raise RuntimeError(f"Codex runtime session '{session_id}' disappeared.")
+    current = _claim_codex_supervisor_lease(
+        current,
+        owner_token=owner_token,
+        owner_instance_id=owner_instance_id,
+        owner_pid=owner_pid,
+        allow_takeover=True,
+    )
+    pane_id = _string(current.get("pane_id")) or _string(_dict(current.get("transport")).get("pane_id"))
+    if not pane_id or not _tmux_pane_exists(pane_id):
+        current["status"] = "stopped"
+        current["current_phase"] = "stopped"
+        current["summary"] = "Codex pane is no longer available."
+        current["completed_at"] = utc_now_iso()
+        return _persist_codex_session(current, event_type="codex.supervisor.pane_missing")
+
+    if current.get("pending_nudge_count"):
+        current = apply_codex_nudges(session_id=session_id)
+        current = _load_session_payload(session_id)
+
+    if _string(current.get("operator_mode")) == "paused":
+        current["status"] = "paused"
+        current["current_phase"] = "paused"
+        return _persist_codex_session(current)
+
+    waiting = _codex_pane_waiting_for_input(pane_id)
+    if _string(current.get("stop_requested_at")) and waiting:
+        current["status"] = "stopped"
+        current["current_phase"] = "stopped"
+        current["completed_at"] = utc_now_iso()
+        current["summary"] = _string(current.get("stop_reason")) or "Stop requested by operator."
+        return _persist_codex_session(
+            current,
+            event_type="codex.supervisor.stopped",
+            event_details={"reason": current["summary"]},
+        )
+
+    current_turn = _optional_int(current.get("current_turn")) or 0
+    last_prompted_turn = _optional_int(current.get("supervisor_last_prompted_turn"))
+    if waiting and last_prompted_turn != current_turn:
+        prompt = _codex_continue_prompt(current)
+        _run_tmux_command("send-keys", "-t", pane_id, prompt, "Enter")
+        current["supervisor_last_prompted_turn"] = current_turn
+        current["supervisor_last_prompted_at"] = utc_now_iso()
+        current["current_phase"] = "awaiting-turn"
+        current["summary"] = f"Prompted Codex for bounded turn {current_turn + 1}."
+        return _persist_codex_session(
+            current,
+            event_type="codex.supervisor.prompt_sent",
+            event_details={"turn_number": current_turn + 1},
+        )
+
+    current["status"] = "active"
+    current["current_phase"] = "waiting" if waiting else "running"
+    return _persist_codex_session(current)
+
+
+async def run_codex_supervisor(
+    *,
+    session_id: str,
+    owner_token: str,
+    owner_instance_id: str = "",
+) -> dict[str, Any]:
+    """Detached worker loop that keeps a live Codex pane moving autonomously."""
+
+    resolved_instance = _string(owner_instance_id) or uuid4().hex
+    while True:
+        current = run_codex_supervisor_iteration(
+            session_id=session_id,
+            owner_token=owner_token,
+            owner_instance_id=resolved_instance,
+            owner_pid=os.getpid(),
+        )
+        if _string(current.get("status")).lower() in CODEX_TERMINAL_STATUSES:
+            response = _status_response(current, include_nudges=True)
+            response["owner_token"] = owner_token
+            return response
+        await asyncio.sleep(CODEX_SUPERVISOR_POLL_SECONDS)
 
 
 def _nudge_message_line(nudge: dict[str, Any]) -> str:

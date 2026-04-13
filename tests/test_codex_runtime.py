@@ -21,6 +21,9 @@ from research_copilot.services.codex_runtime import (
     drain_codex_nudges,
     enqueue_codex_nudge,
     ingest_codex_turn_report,
+    run_codex_supervisor_iteration,
+    start_codex_supervisor,
+    stop_codex_supervisor,
 )
 
 
@@ -304,3 +307,102 @@ def test_codex_runtime_status_reports_lagging_and_stale_from_heartbeat_age(monke
 
     assert lagging["freshness_state"] == "lagging"
     assert stale["freshness_state"] == "stale"
+
+
+def test_start_codex_supervisor_sets_hands_off_owner_and_returns_owner_token(monkeypatch, tmp_path) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("research_copilot.services.codex_runtime._tmux_pane_exists", lambda pane_id: pane_id == "%12")
+    monkeypatch.setattr(
+        "research_copilot.services.codex_runtime._tmux_pane_metadata",
+        lambda pane_id: {
+            "pane_id": "%12",
+            "session_name": "codex-1",
+            "window_name": "brain",
+            "workspace": str(tmp_path),
+        },
+    )
+
+    payload = start_codex_supervisor(
+        session_id="codex-1",
+        pane_id="%12",
+        goal="Autonomously continue the research loop",
+        workspace=str(tmp_path),
+    )
+
+    active = load_codex_active_session()
+
+    assert payload["owner_token"]
+    assert active["operator_mode"] == "hands_off"
+    assert active["status"] == "active"
+    assert active["worker_started"] is False
+
+
+def test_codex_supervisor_iteration_prompts_when_pane_is_waiting(monkeypatch, tmp_path) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("research_copilot.services.codex_runtime._tmux_pane_exists", lambda pane_id: pane_id == "%12")
+    monkeypatch.setattr(
+        "research_copilot.services.codex_runtime._tmux_pane_metadata",
+        lambda pane_id: {
+            "pane_id": "%12",
+            "session_name": "codex-1",
+            "window_name": "brain",
+            "workspace": str(tmp_path),
+        },
+    )
+    sent: list[tuple[str, ...]] = []
+
+    def fake_run_tmux_command(*args: str):
+        sent.append(args)
+        return None
+
+    monkeypatch.setattr("research_copilot.services.codex_runtime._run_tmux_command", fake_run_tmux_command)
+    monkeypatch.setattr("research_copilot.services.codex_runtime._codex_pane_waiting_for_input", lambda pane_id: True)
+
+    started = start_codex_supervisor(
+        session_id="codex-1",
+        pane_id="%12",
+        goal="Autonomous research",
+        workspace=str(tmp_path),
+    )
+    current = run_codex_supervisor_iteration(
+        session_id="codex-1",
+        owner_token=started["owner_token"],
+        owner_instance_id="worker-1",
+        owner_pid=12345,
+    )
+
+    assert current["current_phase"] == "awaiting-turn"
+    assert any(args[:3] == ("send-keys", "-t", "%12") for args in sent)
+    assert "Continue the autonomous research loop" in " ".join(sent[-1])
+
+
+def test_codex_supervisor_iteration_stops_when_stop_requested_and_idle(monkeypatch, tmp_path) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("research_copilot.services.codex_runtime._tmux_pane_exists", lambda pane_id: pane_id == "%12")
+    monkeypatch.setattr(
+        "research_copilot.services.codex_runtime._tmux_pane_metadata",
+        lambda pane_id: {
+            "pane_id": "%12",
+            "session_name": "codex-1",
+            "window_name": "brain",
+            "workspace": str(tmp_path),
+        },
+    )
+    monkeypatch.setattr("research_copilot.services.codex_runtime._codex_pane_waiting_for_input", lambda pane_id: True)
+
+    started = start_codex_supervisor(
+        session_id="codex-1",
+        pane_id="%12",
+        goal="Autonomous research",
+        workspace=str(tmp_path),
+    )
+    stop_codex_supervisor(session_id="codex-1", owner_token=started["owner_token"], reason="Stop now")
+    current = run_codex_supervisor_iteration(
+        session_id="codex-1",
+        owner_token=started["owner_token"],
+        owner_instance_id="worker-1",
+        owner_pid=12345,
+    )
+
+    assert current["status"] == "stopped"
+    assert current["current_phase"] == "stopped"

@@ -136,6 +136,7 @@ class FullLogRecord:
 @dataclass(frozen=True)
 class RuntimeRecord:
     source: str
+    session_id: str
     run_id: str
     status: str
     current_phase: str
@@ -158,6 +159,11 @@ class RuntimeRecord:
     consecutive_failures: int
     operator_mode: str
     pending_nudge_count: int
+    transport: str
+    pane_id: str
+    window_name: str
+    session_name: str
+    workspace: str
     freshness_label: str
     freshness_state: str
     is_stale: bool
@@ -334,6 +340,7 @@ def _build_runtime_record(snapshot: dict[str, Any]) -> RuntimeRecord | None:
 
     return RuntimeRecord(
         source=str(runtime.get("source") or ""),
+        session_id=str(runtime.get("session_id") or ""),
         run_id=str(runtime.get("run_id") or ""),
         status=status,
         current_phase=str(runtime.get("current_phase") or ""),
@@ -356,6 +363,11 @@ def _build_runtime_record(snapshot: dict[str, Any]) -> RuntimeRecord | None:
         consecutive_failures=int(runtime.get("consecutive_failures") or 0),
         operator_mode=str(runtime.get("operator_mode") or ""),
         pending_nudge_count=int(runtime.get("pending_nudge_count") or 0),
+        transport=str(runtime.get("transport") or ""),
+        pane_id=str(runtime.get("pane_id") or ""),
+        window_name=str(runtime.get("window_name") or ""),
+        session_name=str(runtime.get("session_name") or ""),
+        workspace=str(runtime.get("workspace") or ""),
         freshness_label=freshness_label,
         freshness_state=freshness_state,
         is_stale=freshness_state == "stale" or status == "stale",
