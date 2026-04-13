@@ -62,6 +62,18 @@ from research_copilot.services.research_ops import (
     submit_job as submit_job_service,
     update_experiment as update_experiment_service,
 )
+from research_copilot.services.codex_runtime import (
+    apply_codex_nudges,
+    attach_codex_session,
+    codex_runtime_status,
+    drain_codex_nudges,
+    enqueue_codex_nudge,
+    ingest_codex_turn_report,
+    resume_codex_supervisor,
+    run_codex_supervisor,
+    start_codex_supervisor,
+    stop_codex_supervisor,
+)
 from research_copilot.services.ultrawork import (
     build_ultrawork_run_plan,
     execute_ultrawork_profile,
@@ -520,6 +532,105 @@ def _autonomous_worker_env() -> dict[str, str]:
     return env
 
 
+def _codex_worker_auth_dir() -> Path:
+    path = resolve_workspace().canonical_root / "runtime" / "auth"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _create_codex_worker_auth_file(session_id: str, owner_token: str) -> Path:
+    auth_path = _codex_worker_auth_dir() / f"codex-{session_id}-{uuid4().hex}.json"
+    payload = {
+        "session_id": session_id,
+        "owner_token": owner_token,
+        "owner_instance_id": uuid4().hex,
+        "created_at": utc_now_iso(),
+    }
+    auth_path.write_text(json.dumps(payload), encoding="utf-8")
+    try:
+        os.chmod(auth_path, 0o600)
+    except OSError:
+        pass
+    return auth_path
+
+
+def _read_codex_worker_auth_file(auth_file: str) -> dict[str, Any]:
+    path = Path(auth_file)
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    finally:
+        path.unlink(missing_ok=True)
+    return payload if isinstance(payload, dict) else {}
+
+
+def _codex_worker_argv(session_id: str, auth_file: str) -> list[str]:
+    workspace = str(resolve_workspace().workspace_dir)
+    return [
+        sys.executable,
+        "-m",
+        "research_copilot.main",
+        "--workspace",
+        workspace,
+        "runtime",
+        "codex-worker",
+        "--session-id",
+        session_id,
+        "--auth-file",
+        auth_file,
+    ]
+
+
+def _codex_worker_env() -> dict[str, str]:
+    workspace = str(resolve_workspace().workspace_dir)
+    env = os.environ.copy()
+    env["RC_WORKING_DIR"] = workspace
+    src_root = str(Path(__file__).resolve().parent.parent)
+    existing_pythonpath = env.get("PYTHONPATH", "")
+    paths = [path for path in existing_pythonpath.split(os.pathsep) if path]
+    if src_root not in paths:
+        env["PYTHONPATH"] = os.pathsep.join([src_root, *paths]) if paths else src_root
+    return env
+
+
+def _should_launch_codex_worker(payload: Any) -> bool:
+    runtime = _runtime_payload_view(payload)
+    if not runtime:
+        return False
+    if runtime.get("worker_started") or runtime.get("supervisor_pid"):
+        return False
+    return bool(runtime.get("session_id") and runtime.get("owner_token"))
+
+
+def _launch_codex_worker(payload: Any) -> None:
+    if not _should_launch_codex_worker(payload):
+        return
+
+    session_id = str(_runtime_value(payload, "session_id") or "").strip()
+    owner_token = str(_runtime_value(payload, "owner_token") or "").strip()
+    if not session_id or not owner_token:
+        raise click.ClickException("Codex supervisor start did not return a session_id/owner_token pair.")
+    auth_file = _create_codex_worker_auth_file(session_id, owner_token)
+
+    popen_kwargs: dict[str, Any] = {
+        "args": _codex_worker_argv(session_id, str(auth_file)),
+        "cwd": str(resolve_workspace().workspace_dir),
+        "env": _codex_worker_env(),
+        "stdin": subprocess.DEVNULL,
+        "stdout": subprocess.DEVNULL,
+        "stderr": subprocess.DEVNULL,
+        "close_fds": True,
+    }
+    if os.name == "nt":
+        creationflags = 0
+        for flag_name in ("CREATE_NEW_PROCESS_GROUP", "DETACHED_PROCESS", "CREATE_NO_WINDOW"):
+            creationflags |= int(getattr(subprocess, flag_name, 0))
+        if creationflags:
+            popen_kwargs["creationflags"] = creationflags
+    else:
+        popen_kwargs["start_new_session"] = True
+    subprocess.Popen(**popen_kwargs)
+
+
 def _should_launch_autonomous_worker(payload: Any) -> bool:
     runtime = _runtime_payload_view(payload)
     if not runtime:
@@ -620,6 +731,328 @@ def mcp_print_claude_config():
 def mcp_print_agents_snippet():
     """Render an AGENTS.md hint that nudges Research Copilot MCP usage."""
     click.echo(render_agents_snippet())
+
+
+@cli.group()
+def runtime():
+    """Inspect and steer the Codex-managed runtime."""
+
+
+@runtime.command("codex-attach")
+@click.option("--session-id", required=True, help="Stable Codex session identifier.")
+@click.option("--goal", default="", help="Optional operator-visible goal.")
+@click.option("--constraint", "constraints", multiple=True, help="Repeatable session constraint.")
+@click.option(
+    "--allowed-action",
+    "allowed_actions",
+    multiple=True,
+    help="Repeatable allowed action.",
+)
+@click.option("--status", default="running", show_default=True)
+@click.option("--current-turn", type=int, default=None)
+@click.option("--turn-state", default="", help="Current Codex turn state.")
+@click.option(
+    "--operator-mode",
+    type=click.Choice(["hands_off", "steerable", "paused"], case_sensitive=False),
+    default="steerable",
+    show_default=True,
+)
+@click.option(
+    "--transport",
+    "transport_type",
+    type=click.Choice(["tmux-pane", "managed-process"], case_sensitive=False),
+    default="tmux-pane",
+    show_default=True,
+)
+@click.option("--pane-id", default="")
+@click.option("--window-name", default="")
+@click.option("--session-name", default="")
+@click.option("--profile-name", default="")
+@click.option("--autonomy-level", default="")
+@click.option("--actor-type", default="codex", show_default=True)
+@click.option("--json", "as_json", is_flag=True, help="Emit machine-readable JSON.")
+def runtime_codex_attach(
+    session_id: str,
+    goal: str,
+    constraints: tuple[str, ...],
+    allowed_actions: tuple[str, ...],
+    status: str,
+    current_turn: int | None,
+    turn_state: str,
+    operator_mode: str,
+    transport_type: str,
+    pane_id: str,
+    window_name: str,
+    session_name: str,
+    profile_name: str,
+    autonomy_level: str,
+    actor_type: str,
+    as_json: bool,
+):
+    """Register or reattach a Codex session as the active runtime."""
+    _guard_machine_mutation(as_json)
+    payload = attach_codex_session(
+        session_id=session_id,
+        goal=goal,
+        constraints=list(constraints),
+        allowed_actions=list(allowed_actions),
+        status=status,
+        current_turn=current_turn,
+        turn_state=turn_state,
+        operator_mode=operator_mode,
+        transport=transport_type,
+        pane_id=pane_id,
+        window_name=window_name,
+        session_name=session_name,
+        workspace=str(resolve_workspace().workspace_dir),
+        profile_name=profile_name,
+        autonomy_level=autonomy_level,
+        actor_type=actor_type,
+    )
+    _emit_result(payload, as_json, f"Codex session {payload['session_id']} attached.")
+
+
+@runtime.command("codex-status")
+@click.option("--session-id", default="", help="Optional session identifier; defaults to the active session.")
+@click.option("--include-nudges", is_flag=True, help="Include queued steering nudges.")
+@click.option("--json", "as_json", is_flag=True, help="Emit machine-readable JSON.")
+def runtime_codex_status(session_id: str, include_nudges: bool, as_json: bool):
+    """Inspect Codex-managed runtime state without mutating it."""
+    payload = codex_runtime_status(session_id=session_id, include_nudges=include_nudges)
+    summary = (
+        f"Codex session {payload['session_id']} is {payload['status']} "
+        f"({payload['freshness_label']})."
+        if payload.get("available")
+        else payload["summary"]
+    )
+    _emit_result(payload, as_json, summary)
+
+
+@runtime.command("codex-report")
+@click.option("--session-id", required=True, help="Stable Codex session identifier.")
+@click.option("--turn-number", type=int, required=True, help="Bounded Codex turn number.")
+@click.option("--summary", required=True, help="Visible summary for this Codex turn.")
+@click.option("--action", default="", help="Latest visible action label.")
+@click.option("--artifact", "artifacts", multiple=True, help="Repeatable artifact identifier.")
+@click.option("--status", default="", help="Optional reported status override.")
+@click.option("--turn-state", default="", help="Optional reported turn state.")
+@click.option("--experiment-id", default="", help="Optional experiment id touched by this turn.")
+@click.option("--review-id", default="", help="Optional review id touched by this turn.")
+@click.option("--context-update", default="", help="Optional context key/value label updated by this turn.")
+@click.option("--reported-at", default="", help="Optional report timestamp override.")
+@click.option("--heartbeat-at", default="", help="Optional heartbeat timestamp override.")
+@click.option("--pane-id", default="")
+@click.option("--window-name", default="")
+@click.option("--session-name", default="")
+@click.option("--json", "as_json", is_flag=True, help="Emit machine-readable JSON.")
+def runtime_codex_report(
+    session_id: str,
+    turn_number: int,
+    summary: str,
+    action: str,
+    artifacts: tuple[str, ...],
+    status: str,
+    turn_state: str,
+    experiment_id: str,
+    review_id: str,
+    context_update: str,
+    reported_at: str,
+    heartbeat_at: str,
+    pane_id: str,
+    window_name: str,
+    session_name: str,
+    as_json: bool,
+):
+    """Ingest one bounded Codex turn report into the shared runtime state."""
+    _guard_machine_mutation(as_json)
+    payload = ingest_codex_turn_report(
+        session_id=session_id,
+        turn_number=turn_number,
+        summary=summary,
+        action=action,
+        artifacts=list(artifacts),
+        status=status,
+        turn_state=turn_state,
+        experiment_id=experiment_id,
+        review_id=review_id,
+        context_update=context_update,
+        reported_at=reported_at,
+        heartbeat_at=heartbeat_at,
+        pane_id=pane_id,
+        window_name=window_name,
+        session_name=session_name,
+        workspace=str(resolve_workspace().workspace_dir),
+    )
+    outcome = "conflict" if payload.get("conflict") else "duplicate" if payload.get("duplicate") else "accepted"
+    _emit_result(payload, as_json, f"Turn {turn_number} for session {session_id} {outcome}.")
+
+
+@runtime.command("codex-nudge")
+@click.option("--session-id", required=True, help="Stable Codex session identifier.")
+@click.option(
+    "--kind",
+    type=click.Choice(["nudge", "pause", "resume", "stop_after_turn", "request_summary"], case_sensitive=False),
+    required=True,
+)
+@click.option("--message", default="", help="Optional operator steering message.")
+@click.option("--payload", default="", help="Optional JSON payload for richer steering metadata.")
+@click.option("--actor-type", default="human", show_default=True)
+@click.option("--json", "as_json", is_flag=True, help="Emit machine-readable JSON.")
+def runtime_codex_nudge(
+    session_id: str,
+    kind: str,
+    message: str,
+    payload: str,
+    actor_type: str,
+    as_json: bool,
+):
+    """Enqueue one steering nudge for a Codex-managed session."""
+    _guard_machine_mutation(as_json)
+    result = enqueue_codex_nudge(
+        session_id=session_id,
+        kind=kind,
+        message=message,
+        payload=_parse_json_object(payload, option_name="payload"),
+        actor_type=actor_type,
+    )
+    _emit_result(result, as_json, f"Queued {kind} nudge for session {session_id}.")
+
+
+def _runtime_codex_nudge_wrapper(kind: str, session_id: str, message: str, as_json: bool) -> None:
+    _guard_machine_mutation(as_json)
+    result = enqueue_codex_nudge(session_id=session_id, kind=kind, message=message)
+    _emit_result(result, as_json, f"Queued {kind} nudge for session {session_id}.")
+
+
+@runtime.command("codex-pause")
+@click.option("--session-id", required=True, help="Stable Codex session identifier.")
+@click.option("--message", default="", help="Optional pause reason.")
+@click.option("--json", "as_json", is_flag=True, help="Emit machine-readable JSON.")
+def runtime_codex_pause(session_id: str, message: str, as_json: bool):
+    """Pause a steerable Codex session after the current bounded turn."""
+    _runtime_codex_nudge_wrapper("pause", session_id, message, as_json)
+
+
+@runtime.command("codex-resume")
+@click.option("--session-id", required=True, help="Stable Codex session identifier.")
+@click.option("--message", default="", help="Optional resume note.")
+@click.option("--json", "as_json", is_flag=True, help="Emit machine-readable JSON.")
+def runtime_codex_resume(session_id: str, message: str, as_json: bool):
+    """Resume a paused Codex session."""
+    _runtime_codex_nudge_wrapper("resume", session_id, message, as_json)
+
+
+@runtime.command("codex-stop-after-turn")
+@click.option("--session-id", required=True, help="Stable Codex session identifier.")
+@click.option("--message", default="", help="Optional operator stop reason.")
+@click.option("--json", "as_json", is_flag=True, help="Emit machine-readable JSON.")
+def runtime_codex_stop_after_turn(session_id: str, message: str, as_json: bool):
+    """Request a graceful stop after the current bounded Codex turn."""
+    _runtime_codex_nudge_wrapper("stop_after_turn", session_id, message, as_json)
+
+
+@runtime.command("codex-request-summary")
+@click.option("--session-id", required=True, help="Stable Codex session identifier.")
+@click.option("--message", default="", help="Optional request detail.")
+@click.option("--json", "as_json", is_flag=True, help="Emit machine-readable JSON.")
+def runtime_codex_request_summary(session_id: str, message: str, as_json: bool):
+    """Request an immediate visible Codex turn summary refresh."""
+    _runtime_codex_nudge_wrapper("request_summary", session_id, message, as_json)
+
+
+@runtime.command("codex-drain-nudges")
+@click.option("--session-id", required=True, help="Stable Codex session identifier.")
+@click.option("--limit", type=click.IntRange(1, None), default=None)
+@click.option("--json", "as_json", is_flag=True, help="Emit machine-readable JSON.")
+def runtime_codex_drain_nudges(session_id: str, limit: int | None, as_json: bool):
+    """Drain and return pending steering nudges for a Codex-managed session."""
+    _guard_machine_mutation(as_json)
+    payload = drain_codex_nudges(session_id=session_id, limit=limit)
+    _emit_result(payload, as_json, f"Drained {len(payload['drained'])} nudge(s) for session {session_id}.")
+
+
+@runtime.command("codex-apply-nudges")
+@click.option("--session-id", required=True, help="Stable Codex session identifier.")
+@click.option("--limit", type=click.IntRange(1, None), default=None)
+@click.option("--json", "as_json", is_flag=True, help="Emit machine-readable JSON.")
+def runtime_codex_apply_nudges(session_id: str, limit: int | None, as_json: bool):
+    """Apply queued steering nudges into the registered tmux pane, then drain them."""
+    _guard_machine_mutation(as_json)
+    payload = apply_codex_nudges(session_id=session_id, limit=limit)
+    _emit_result(payload, as_json, f"Applied {len(payload['applied'])} nudge(s) to session {session_id}.")
+
+
+@runtime.command("codex-run")
+@click.option("--session-id", required=True, help="Stable Codex session identifier.")
+@click.option("--pane-id", default="", help="Required when the session is not already attached.")
+@click.option("--goal", default="", help="Optional goal override.")
+@click.option("--workspace-path", default="", help="Optional workspace path override for first attach.")
+@click.option("--window-name", default="")
+@click.option("--session-name", default="")
+@click.option("--json", "as_json", is_flag=True, help="Emit machine-readable JSON.")
+def runtime_codex_run(
+    session_id: str,
+    pane_id: str,
+    goal: str,
+    workspace_path: str,
+    window_name: str,
+    session_name: str,
+    as_json: bool,
+):
+    """Start the detached Codex supervisor loop."""
+    _guard_machine_mutation(as_json)
+    payload = start_codex_supervisor(
+        session_id=session_id,
+        pane_id=pane_id,
+        goal=goal,
+        workspace=workspace_path or str(resolve_workspace().workspace_dir),
+        window_name=window_name,
+        session_name=session_name,
+    )
+    _launch_codex_worker(payload)
+    _emit_result(payload, as_json, f"Codex supervisor started for session {session_id}.")
+
+
+@runtime.command("codex-stop")
+@click.option("--session-id", required=True, help="Stable Codex session identifier.")
+@click.option("--owner-token", default="", help="Optional owner token for a stricter stop request.")
+@click.option("--reason", default="", help="Optional operator stop reason.")
+@click.option("--json", "as_json", is_flag=True, help="Emit machine-readable JSON.")
+def runtime_codex_stop(session_id: str, owner_token: str, reason: str, as_json: bool):
+    """Request a graceful stop for the detached Codex supervisor."""
+    _guard_machine_mutation(as_json)
+    payload = stop_codex_supervisor(session_id=session_id, owner_token=owner_token, reason=reason)
+    _emit_result(payload, as_json, f"Codex supervisor stop requested for session {session_id}.")
+
+
+@runtime.command("codex-supervisor-resume")
+@click.option("--session-id", required=True, help="Stable Codex session identifier.")
+@click.option("--owner-token", default="", help="Optional owner token for a stricter resume request.")
+@click.option("--json", "as_json", is_flag=True, help="Emit machine-readable JSON.")
+def runtime_codex_supervisor_resume(session_id: str, owner_token: str, as_json: bool):
+    """Resume the detached Codex supervisor loop."""
+    _guard_machine_mutation(as_json)
+    payload = resume_codex_supervisor(session_id=session_id, owner_token=owner_token)
+    _launch_codex_worker(payload)
+    _emit_result(payload, as_json, f"Codex supervisor resumed for session {session_id}.")
+
+
+@runtime.command("codex-worker", hidden=True)
+@click.option("--session-id", required=True, help="Persisted Codex session id.")
+@click.option("--auth-file", default="", help="Protected auth file for the detached Codex worker.")
+@click.option("--owner-token", default="", help="Backward-compatible direct owner token.")
+def runtime_codex_worker(session_id: str, auth_file: str, owner_token: str):
+    """Internal detached worker entrypoint for the Codex supervisor."""
+    auth_payload = _read_codex_worker_auth_file(auth_file) if auth_file else {}
+    resolved_owner_token = str(auth_payload.get("owner_token") or owner_token or "")
+    owner_instance_id = str(auth_payload.get("owner_instance_id") or "")
+    _run_command(
+        run_codex_supervisor(
+            session_id=session_id,
+            owner_token=resolved_owner_token,
+            owner_instance_id=owner_instance_id,
+        )
+    )
 
 
 @cli.group()

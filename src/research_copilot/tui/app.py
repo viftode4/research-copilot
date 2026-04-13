@@ -1225,6 +1225,8 @@ class ResearchCopilotTUI:
         )
         freshness_state = str(runtime.get("freshness_state") or "unknown")
         return RuntimeRecord(
+            source=str(runtime.get("source") or ""),
+            session_id=str(runtime.get("session_id") or ""),
             run_id=str(runtime.get("run_id") or ""),
             status=status,
             current_phase=str(runtime.get("current_phase") or ""),
@@ -1249,10 +1251,17 @@ class ResearchCopilotTUI:
             stop_requested_at=str(runtime.get("stop_requested_at") or ""),
             stop_reason=str(runtime.get("stop_reason") or ""),
             consecutive_failures=int(runtime.get("consecutive_failures") or 0),
+            operator_mode=str(runtime.get("operator_mode") or ""),
+            pending_nudge_count=int(runtime.get("pending_nudge_count") or 0),
+            transport=str(runtime.get("transport") or ""),
+            pane_id=str(runtime.get("pane_id") or ""),
+            window_name=str(runtime.get("window_name") or ""),
+            session_name=str(runtime.get("session_name") or ""),
+            workspace=str(runtime.get("workspace") or ""),
             freshness_label=freshness_label,
             freshness_state=freshness_state,
             is_stale=bool(runtime.get("is_stale")) or status == "stale",
-            is_active=bool(runtime.get("is_active")) or status in {"running", "stopping"},
+            is_active=bool(runtime.get("is_active")) or status in {"running", "stopping", "paused"},
         )
 
     def _runtime_header_summary(self) -> str:

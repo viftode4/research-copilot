@@ -7,6 +7,11 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
+from research_copilot.research_state import get_research_root, load_run_artifact
+from research_copilot.services.codex_runtime import (
+    CODEX_LAGGING_THRESHOLD_SECONDS,
+    CODEX_STALE_THRESHOLD_SECONDS,
+)
 from research_copilot.services.research_ops import ACTIVE_JOB_STATUSES, ResearchOpsService
 from research_copilot.services.workflow_snapshot import build_canonical_snapshot
 
@@ -44,6 +49,28 @@ def load_full_job_logs(
     stdout = state.stdout or "(no stdout)"
     stderr = state.stderr or "(no stderr)"
     return stdout, stderr
+
+
+def load_full_local_run_logs(run_id: str) -> tuple[str, str]:
+    """Load full logs for a file-backed local run."""
+
+    artifact = load_run_artifact(run_id)
+    if not artifact:
+        raise ValueError(f"Local run {run_id} was not found")
+    stdout = str(artifact.get("stdout") or "(no stdout)")
+    stderr = str(artifact.get("stderr") or "(no stderr)")
+    return stdout, stderr
+
+
+def _find_local_run_for_experiment(experiment_id: str) -> str:
+    runs_dir = get_research_root() / "runs"
+    if not runs_dir.exists():
+        return ""
+    for status_path in sorted(runs_dir.glob("*/status.json"), reverse=True):
+        artifact = load_run_artifact(status_path.parent.name)
+        if str(artifact.get("experiment_id") or "") == experiment_id:
+            return str(artifact.get("run_id") or status_path.parent.name)
+    return ""
 
 
 @dataclass(frozen=True)
@@ -131,6 +158,8 @@ class FullLogRecord:
 
 @dataclass(frozen=True)
 class RuntimeRecord:
+    source: str
+    session_id: str
     run_id: str
     status: str
     current_phase: str
@@ -151,6 +180,13 @@ class RuntimeRecord:
     stop_requested_at: str
     stop_reason: str
     consecutive_failures: int
+    operator_mode: str
+    pending_nudge_count: int
+    transport: str
+    pane_id: str
+    window_name: str
+    session_name: str
+    workspace: str
     freshness_label: str
     freshness_state: str
     is_stale: bool
@@ -164,6 +200,10 @@ def fetch_full_run_log(
 ) -> FullLogRecord:
     """Resolve full logs from a stable run entity id."""
 
+    if entity_id.startswith("run-local:"):
+        run_id = entity_id.removeprefix("run-local:")
+        stdout, stderr = load_full_local_run_logs(run_id)
+        return FullLogRecord(entity_id=entity_id, job_id=run_id, stdout=stdout, stderr=stderr)
     if not entity_id.startswith("run:"):
         raise ValueError(f"Unsupported log entity id: {entity_id}")
     job_id = entity_id.removeprefix("run:")
@@ -184,15 +224,23 @@ def fetch_full_entity_log(
     if entity_id.startswith("experiment:"):
         experiment_id = entity_id.removeprefix("experiment:")
         experiment = resolved_service.get_experiment(experiment_id)
-        if not experiment.linked_job_id:
-            raise ValueError(f"Experiment {experiment_id} does not have a linked job and has no linked run logs")
-        stdout, stderr = load_full_job_logs(experiment.linked_job_id, service=resolved_service)
-        return FullLogRecord(
-            entity_id=entity_id,
-            job_id=experiment.linked_job_id,
-            stdout=stdout,
-            stderr=stderr,
-        )
+        if experiment.linked_job_id and experiment.linked_job_id.startswith("run-local:"):
+            run_id = experiment.linked_job_id.removeprefix("run-local:")
+            stdout, stderr = load_full_local_run_logs(run_id)
+            return FullLogRecord(entity_id=entity_id, job_id=run_id, stdout=stdout, stderr=stderr)
+        if experiment.linked_job_id:
+            stdout, stderr = load_full_job_logs(experiment.linked_job_id, service=resolved_service)
+            return FullLogRecord(
+                entity_id=entity_id,
+                job_id=experiment.linked_job_id,
+                stdout=stdout,
+                stderr=stderr,
+            )
+        local_run_id = _find_local_run_for_experiment(experiment_id)
+        if local_run_id:
+            stdout, stderr = load_full_local_run_logs(local_run_id)
+            return FullLogRecord(entity_id=entity_id, job_id=local_run_id, stdout=stdout, stderr=stderr)
+        raise ValueError(f"Experiment {experiment_id} does not have a linked job and has no linked run logs")
     raise ValueError(f"Unsupported log entity id: {entity_id}")
 
 
@@ -314,11 +362,20 @@ def _build_runtime_record(snapshot: dict[str, Any]) -> RuntimeRecord | None:
         )
     elif heartbeat is not None:
         age_seconds = max(0, int((now - heartbeat).total_seconds()))
-        freshness_state = "fresh" if age_seconds <= 15 else "lagging" if age_seconds <= 60 else "stale"
+        if age_seconds >= CODEX_STALE_THRESHOLD_SECONDS:
+            freshness_state = "stale"
+            freshness_label = f"stale • heartbeat {_relative_age_label(heartbeat_at, now=now)}"
+        elif age_seconds >= CODEX_LAGGING_THRESHOLD_SECONDS:
+            freshness_state = "lagging"
+            freshness_label = f"lagging • heartbeat {_relative_age_label(heartbeat_at, now=now)}"
+        else:
+            freshness_state = "fresh"
     elif status in {"completed", "failed", "stopped"}:
         freshness_state = "terminal"
 
     return RuntimeRecord(
+        source=str(runtime.get("source") or ""),
+        session_id=str(runtime.get("session_id") or ""),
         run_id=str(runtime.get("run_id") or ""),
         status=status,
         current_phase=str(runtime.get("current_phase") or ""),
@@ -339,10 +396,17 @@ def _build_runtime_record(snapshot: dict[str, Any]) -> RuntimeRecord | None:
         stop_requested_at=str(runtime.get("stop_requested_at") or ""),
         stop_reason=str(runtime.get("stop_reason") or ""),
         consecutive_failures=int(runtime.get("consecutive_failures") or 0),
+        operator_mode=str(runtime.get("operator_mode") or ""),
+        pending_nudge_count=int(runtime.get("pending_nudge_count") or 0),
+        transport=str(runtime.get("transport") or ""),
+        pane_id=str(runtime.get("pane_id") or ""),
+        window_name=str(runtime.get("window_name") or ""),
+        session_name=str(runtime.get("session_name") or ""),
+        workspace=str(runtime.get("workspace") or ""),
         freshness_label=freshness_label,
         freshness_state=freshness_state,
         is_stale=freshness_state == "stale" or status == "stale",
-        is_active=status in {"running", "stopping"},
+        is_active=status in {"running", "stopping", "paused"},
     )
 
 
@@ -410,8 +474,8 @@ def build_dashboard_snapshot(*, service: ResearchOpsService | None = None) -> Da
     jobs_records = tuple(
         JobRecord(
             entity_id=entity["id"],
-            job_id=str(entity["attributes"]["job_id"]),
-            run_id=str(entity["id"].removeprefix("run:")),
+            job_id=str(entity["attributes"].get("job_id") or entity["attributes"].get("run_id") or ""),
+            run_id=str(entity["attributes"].get("run_id") or entity["id"].removeprefix("run:").removeprefix("run-local:")),
             name=str(entity["name"]),
             status=_normalized_job_status(str(entity["status"])),
             partition=str(entity["attributes"]["partition"]),

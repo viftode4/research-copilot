@@ -14,6 +14,8 @@ from research_copilot.main import cli
 from research_copilot.mcp_servers.knowledge_base import _store
 from research_copilot.mcp_servers.slurm import MockJob, _mock_jobs
 from research_copilot.research_state import (
+    load_codex_active_session,
+    load_codex_turn_summary,
     list_autonomous_runtime_events,
     load_autonomous_runtime,
     load_autonomous_runtime_history,
@@ -504,6 +506,226 @@ def test_autonomous_stop_json_requires_owner_token(monkeypatch, tmp_path):
 
     assert result.exit_code != 0
     assert "owner_token is required" in result.output
+
+
+def test_runtime_help_lists_codex_runtime_commands():
+    runner = CliRunner()
+
+    result = runner.invoke(cli, ["runtime", "--help"])
+
+    assert result.exit_code == 0
+    assert "codex-attach" in result.output
+    assert "codex-status" in result.output
+    assert "codex-report" in result.output
+    assert "codex-nudge" in result.output
+    assert "codex-drain-nudges" in result.output
+    assert "codex-apply-nudges" in result.output
+    assert "codex-run" in result.output
+    assert "codex-stop" in result.output
+    assert "codex-supervisor-resume" in result.output
+
+
+def test_runtime_codex_commands_attach_report_and_drain(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("research_copilot.services.codex_runtime._tmux_pane_exists", lambda pane_id: pane_id == "%71")
+    monkeypatch.setattr(
+        "research_copilot.services.codex_runtime._tmux_pane_metadata",
+        lambda pane_id: {
+            "pane_id": "%71",
+            "session_name": "codex-1",
+            "window_name": "brain",
+            "workspace": str(tmp_path),
+        },
+    )
+    runner = CliRunner()
+
+    attach_result = runner.invoke(
+        cli,
+        [
+            "runtime",
+            "codex-attach",
+            "--session-id",
+            "codex-1",
+            "--pane-id",
+            "%71",
+            "--window-name",
+            "brain",
+            "--json",
+        ],
+    )
+    report_result = runner.invoke(
+        cli,
+        [
+            "runtime",
+            "codex-report",
+            "--session-id",
+            "codex-1",
+            "--turn-number",
+            "1",
+            "--summary",
+            "Reviewed the latest results.",
+            "--action",
+            "review-results",
+            "--experiment-id",
+            "exp-1",
+            "--json",
+        ],
+    )
+    nudge_result = runner.invoke(
+        cli,
+        [
+            "runtime",
+            "codex-stop-after-turn",
+            "--session-id",
+            "codex-1",
+            "--message",
+            "Stop after the current turn.",
+            "--json",
+        ],
+    )
+    drain_result = runner.invoke(
+        cli,
+        [
+            "runtime",
+            "codex-drain-nudges",
+            "--session-id",
+            "codex-1",
+            "--json",
+        ],
+    )
+    status_result = runner.invoke(
+        cli,
+        [
+            "runtime",
+            "codex-status",
+            "--session-id",
+            "codex-1",
+            "--include-nudges",
+            "--json",
+        ],
+    )
+
+    assert attach_result.exit_code == 0, attach_result.output
+    assert report_result.exit_code == 0, report_result.output
+    assert nudge_result.exit_code == 0, nudge_result.output
+    assert drain_result.exit_code == 0, drain_result.output
+    assert status_result.exit_code == 0, status_result.output
+    assert json.loads(attach_result.output)["data"]["session_id"] == "codex-1"
+    assert json.loads(report_result.output)["data"]["accepted"] is True
+    assert json.loads(nudge_result.output)["data"]["nudge"]["kind"] == "stop_after_turn"
+    assert len(json.loads(drain_result.output)["data"]["drained"]) == 1
+    assert json.loads(status_result.output)["data"]["pending_nudge_count"] == 0
+    assert load_codex_active_session()["last_experiment_id"] == "exp-1"
+    assert load_codex_turn_summary("codex-1", 1) == "Reviewed the latest results."
+
+
+def test_runtime_codex_apply_nudges_command_routes_to_live_pane(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("research_copilot.services.codex_runtime._tmux_pane_exists", lambda pane_id: pane_id == "%71")
+    monkeypatch.setattr(
+        "research_copilot.services.codex_runtime._tmux_pane_metadata",
+        lambda pane_id: {
+            "pane_id": "%71",
+            "session_name": "codex-1",
+            "window_name": "brain",
+            "workspace": str(tmp_path),
+        },
+    )
+    runner = CliRunner()
+
+    runner.invoke(
+        cli,
+        [
+            "runtime",
+            "codex-attach",
+            "--session-id",
+            "codex-1",
+            "--pane-id",
+            "%71",
+            "--window-name",
+            "brain",
+            "--json",
+        ],
+    )
+    runner.invoke(
+        cli,
+        [
+            "runtime",
+            "codex-nudge",
+            "--session-id",
+            "codex-1",
+            "--kind",
+            "request_summary",
+            "--message",
+            "Need a tighter recap.",
+            "--json",
+        ],
+    )
+
+    sent: list[tuple[str, ...]] = []
+
+    def fake_run_tmux_command(*args: str):
+        sent.append(args)
+        return None
+
+    monkeypatch.setattr("research_copilot.services.codex_runtime._run_tmux_command", fake_run_tmux_command)
+
+    apply_result = runner.invoke(
+        cli,
+        [
+            "runtime",
+            "codex-apply-nudges",
+            "--session-id",
+            "codex-1",
+            "--json",
+        ],
+    )
+
+    assert apply_result.exit_code == 0, apply_result.output
+    assert json.loads(apply_result.output)["data"]["pending_nudge_count"] == 0
+    assert any(args[:3] == ("send-keys", "-t", "%71") for args in sent)
+
+
+def test_runtime_codex_run_starts_detached_supervisor(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("research_copilot.services.codex_runtime._tmux_pane_exists", lambda pane_id: pane_id == "%71")
+    monkeypatch.setattr(
+        "research_copilot.services.codex_runtime._tmux_pane_metadata",
+        lambda pane_id: {
+            "pane_id": "%71",
+            "session_name": "codex-1",
+            "window_name": "brain",
+            "workspace": str(tmp_path),
+        },
+    )
+    launched: list[dict[str, object]] = []
+
+    monkeypatch.setattr(
+        main_module,
+        "_launch_codex_worker",
+        lambda payload: launched.append(payload),
+    )
+    runner = CliRunner()
+
+    result = runner.invoke(
+        cli,
+        [
+            "runtime",
+            "codex-run",
+            "--session-id",
+            "codex-1",
+            "--pane-id",
+            "%71",
+            "--workspace-path",
+            str(tmp_path),
+            "--json",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)["data"]
+    assert payload["owner_token"]
+    assert launched and launched[0]["owner_token"] == payload["owner_token"]
 
 
 

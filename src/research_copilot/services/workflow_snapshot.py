@@ -4,10 +4,17 @@ from __future__ import annotations
 
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
+import json
 from typing import Any
 
 from research_copilot.mcp_servers.slurm import MockJob
-from research_copilot.research_state import resolve_active_session, resolve_workspace, utc_now_iso
+from research_copilot.research_state import (
+    get_research_root,
+    load_run_artifact,
+    resolve_active_session,
+    resolve_workspace,
+    utc_now_iso,
+)
 from research_copilot.services.research_ops import (
     ACTIVE_EXPERIMENT_STATUSES,
     ContextState,
@@ -198,6 +205,18 @@ def _normalize_experiment_status(status: str) -> str:
     return EXPERIMENT_STATUS_MAP.get(status.lower(), "unknown")
 
 
+def _normalize_local_run_status(status: str) -> str:
+    return {
+        "queued": "queued",
+        "running": "running",
+        "active": "running",
+        "completed": "succeeded",
+        "failed": "failed",
+        "cancelled": "cancelled",
+        "stopped": "cancelled",
+    }.get(status.lower(), "unknown")
+
+
 def _workspace_entity(service: ResearchOpsService, state: Any) -> dict[str, Any]:
     resolved = resolve_workspace()
     return {
@@ -226,6 +245,25 @@ def _workspace_entity(service: ResearchOpsService, state: Any) -> dict[str, Any]
 def _profile_entities() -> list[dict[str, Any]]:
     # Profiles are not yet backed by a first-class service projection in this repo.
     return []
+
+
+def _local_run_records() -> list[dict[str, Any]]:
+    runs_dir = get_research_root() / "runs"
+    if not runs_dir.exists():
+        return []
+    records: list[dict[str, Any]] = []
+    for status_path in sorted(runs_dir.glob("*/status.json")):
+        try:
+            payload = json.loads(status_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            continue
+        if isinstance(payload, dict):
+            run_id = str(payload.get("run_id") or status_path.parent.name)
+            record = load_run_artifact(run_id)
+            if record:
+                records.append(record)
+    records.sort(key=lambda item: str(item.get("updated_at") or ""), reverse=True)
+    return records
 
 
 def _job_entities(
@@ -338,6 +376,101 @@ def _job_entities(
             }
         )
     return job_entities, run_entities, links, actions
+
+
+def _local_run_entities(
+    local_runs: Sequence[Mapping[str, Any]],
+    experiments: Sequence[Any],
+    *,
+    max_log_lines: int,
+    max_log_chars: int,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+    run_entities: list[dict[str, Any]] = []
+    links: list[dict[str, Any]] = []
+    actions: list[dict[str, Any]] = []
+    experiment_names = {
+        str(experiment.experiment_id): str(experiment.name)
+        for experiment in experiments
+    }
+    for run in local_runs:
+        run_id = str(run.get("run_id") or "")
+        if not run_id:
+            continue
+        experiment_id = str(run.get("experiment_id") or "")
+        status = _normalize_local_run_status(str(run.get("status") or "unknown"))
+        updated_at = str(run.get("updated_at") or "")
+        created_at = str(
+            run.get("created_at")
+            or run.get("started_at")
+            or (run.get("provenance") or {}).get("timestamp")
+            or updated_at
+        )
+        stdout = str(run.get("stdout") or "")
+        stderr = str(run.get("stderr") or "")
+        command = str(run.get("command") or "")
+        metrics = dict(run.get("metrics") or {})
+        log_summary = {
+            "stdout_preview": _truncate_log(stdout, max_lines=max_log_lines, max_chars=max_log_chars),
+            "stderr_preview": _truncate_log(stderr, max_lines=max_log_lines, max_chars=max_log_chars),
+            "log_available": bool(stdout or stderr),
+        }
+        entity_id = f"run-local:{run_id}"
+        display_name = experiment_names.get(experiment_id) or command or run_id
+        run_entities.append(
+            {
+                "id": entity_id,
+                "type": "run",
+                "name": display_name,
+                "title": display_name,
+                "status": status,
+                "created_at": created_at,
+                "updated_at": updated_at or created_at,
+                "summary": f"Local run {run_id}",
+                "metrics": metrics,
+                "attributes": {
+                    "run_id": run_id,
+                    "job_id": run_id,
+                    "experiment_id": experiment_id,
+                    "partition": "local",
+                    "gpus": 0,
+                    "time_limit": "local",
+                    "submitted_at": created_at,
+                    "started_at": created_at,
+                    "completed_at": updated_at if status in {"succeeded", "failed", "cancelled"} else "",
+                    "command": command,
+                    "run_source": "local",
+                    "log_summary": log_summary,
+                },
+            }
+        )
+        if experiment_id:
+            links.append(
+                {
+                    "source_id": f"experiment:{experiment_id}",
+                    "target_id": entity_id,
+                    "link_type": "experiment_to_run",
+                    "directionality": "directed",
+                }
+            )
+        actions.append(
+            {
+                "action_id": f"log-summary:{entity_id}",
+                "label": "Open full logs",
+                "tier": 0,
+                "safety_level": "read_only",
+                "enabled": True,
+                "disabled_reason": "",
+                "preconditions": {
+                    "required_statuses": [],
+                    "required_links": [],
+                    "required_capabilities": [],
+                    "notes": "Resolves file-backed local run logs.",
+                },
+                "target_entity_id": entity_id,
+                "scope": "tui_affordance",
+            }
+        )
+    return run_entities, links, actions
 
 
 def _experiment_entities(state_experiments: Sequence[Any]) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
@@ -530,6 +663,16 @@ def build_canonical_snapshot(
     entities["run"].extend(run_entities)
     links.extend(job_links)
     actions.extend(job_actions)
+
+    local_run_entities, local_run_links, local_run_actions = _local_run_entities(
+        _local_run_records(),
+        state.experiments,
+        max_log_lines=max_log_lines,
+        max_log_chars=max_log_chars,
+    )
+    entities["run"].extend(local_run_entities)
+    links.extend(local_run_links)
+    actions.extend(local_run_actions)
 
     experiment_entities, experiment_links, experiment_actions = _experiment_entities(state.experiments)
     entities["experiment"].extend(experiment_entities)

@@ -19,13 +19,20 @@ from research_copilot.mcp_servers.slurm import (
     handle_check_job_status,
     handle_submit_job,
 )
+from research_copilot.research_state import save_run_artifact
+from research_copilot.services.codex_runtime import attach_codex_session
 from research_copilot.services.research_ops import ResearchOpsService
 from research_copilot.services.workflow_snapshot import (
     build_canonical_snapshot,
     build_workflow_snapshot,
     summarize_job,
 )
-from research_copilot.tui.adapters import fetch_full_entity_log, fetch_full_run_log, load_full_job_logs
+from research_copilot.tui.adapters import (
+    build_dashboard_snapshot,
+    fetch_full_entity_log,
+    fetch_full_run_log,
+    load_full_job_logs,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -77,6 +84,79 @@ class TestWorkflowSnapshot:
             }.issubset(action)
             for action in snapshot["actions"]
         )
+
+    def test_canonical_snapshot_uses_codex_active_session_when_present(self, monkeypatch, tmp_path):
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr("research_copilot.services.codex_runtime._tmux_pane_exists", lambda pane_id: pane_id == "%91")
+        monkeypatch.setattr(
+            "research_copilot.services.codex_runtime._tmux_pane_metadata",
+            lambda pane_id: {
+                "pane_id": "%91",
+                "session_name": "codex-1",
+                "window_name": "brain",
+                "workspace": str(tmp_path),
+            },
+        )
+        attach_codex_session(
+            session_id="codex-1",
+            goal="Monitor Codex runtime in the dashboard",
+            pane_id="%91",
+            window_name="brain",
+            session_name="codex-1",
+        )
+
+        snapshot = build_canonical_snapshot()
+
+        assert snapshot["runtime"]["source"] == "codex"
+        assert snapshot["runtime"]["session_id"] == "codex-1"
+        assert snapshot["runtime"]["goal"] == "Monitor Codex runtime in the dashboard"
+
+    def test_dashboard_snapshot_marks_lagging_and_stale_freshness_explicitly(self, monkeypatch, tmp_path):
+        monkeypatch.chdir(tmp_path)
+        attach_codex_session(session_id="codex-1")
+        active_path = tmp_path / ".research-copilot" / "runtime" / "codex" / "active.json"
+        payload = json.loads(active_path.read_text(encoding="utf-8"))
+        payload["last_heartbeat_at"] = "2026-04-13T00:00:00+00:00"
+        payload["updated_at"] = "2026-04-13T00:00:00+00:00"
+        active_path.write_text(json.dumps(payload), encoding="utf-8")
+
+        class LaggingDateTime:
+            @staticmethod
+            def now(tz=None):
+                from datetime import datetime, timezone
+
+                return datetime(2026, 4, 13, 0, 1, 10, tzinfo=timezone.utc)
+
+            @staticmethod
+            def fromisoformat(value):
+                from datetime import datetime
+
+                return datetime.fromisoformat(value)
+
+        class StaleDateTime:
+            @staticmethod
+            def now(tz=None):
+                from datetime import datetime, timezone
+
+                return datetime(2026, 4, 13, 0, 3, 10, tzinfo=timezone.utc)
+
+            @staticmethod
+            def fromisoformat(value):
+                from datetime import datetime
+
+                return datetime.fromisoformat(value)
+
+        monkeypatch.setattr("research_copilot.tui.adapters.datetime", LaggingDateTime)
+        lagging_snapshot = build_dashboard_snapshot()
+        assert lagging_snapshot.runtime is not None
+        assert lagging_snapshot.runtime.freshness_state == "lagging"
+        assert "lagging" in lagging_snapshot.runtime.freshness_label
+
+        monkeypatch.setattr("research_copilot.tui.adapters.datetime", StaleDateTime)
+        stale_snapshot = build_dashboard_snapshot()
+        assert stale_snapshot.runtime is not None
+        assert stale_snapshot.runtime.freshness_state == "stale"
+        assert "stale" in stale_snapshot.runtime.freshness_label
 
     @pytest.mark.asyncio
     async def test_snapshot_links_jobs_experiments_and_knowledge(self):
@@ -169,6 +249,54 @@ class TestWorkflowSnapshot:
         assert completed["jobs"]["active"] == 0
         assert "val_accuracy" in completed["jobs"]["items"][0]["stdout_preview"]
 
+    def test_local_runs_appear_in_snapshot_and_link_to_experiments(self, monkeypatch, tmp_path):
+        monkeypatch.chdir(tmp_path)
+        _store["experiments"].append(
+            {
+                "id": "exp-local",
+                "name": "Local exploit probe",
+                "status": "completed",
+                "hypothesis": "Check local run projection",
+                "description": "",
+                "dataset": "synthetic-local",
+                "model_type": "python-stdlib",
+                "tags": ["local-run"],
+                "results": {"context_mod4_lift": 0.001},
+                "wandb_run_id": "",
+                "created_at": "2026-04-13T18:00:00+00:00",
+                "updated_at": "2026-04-13T18:01:00+00:00",
+            }
+        )
+        save_run_artifact(
+            "run-local-1",
+            {
+                "run_id": "run-local-1",
+                "experiment_id": "exp-local",
+                "status": "completed",
+                "command": "python probe.py",
+                "created_at": "2026-04-13T18:00:00+00:00",
+                "updated_at": "2026-04-13T18:01:00+00:00",
+            },
+            stdout="full local stdout",
+            stderr="",
+            metrics={"context_mod4_lift": 0.001},
+        )
+
+        snapshot = build_workflow_snapshot(max_items=10)
+        canonical = build_canonical_snapshot(max_items=20)
+
+        assert snapshot["jobs"]["total"] == 1
+        assert snapshot["jobs"]["items"][0]["job_id"] == "run-local-1"
+        assert snapshot["jobs"]["items"][0]["status"] == "COMPLETED"
+        assert snapshot["selection"]["default_job_id"] == "run-local-1"
+        assert any(entity["id"] == "run-local:run-local-1" for entity in canonical["entities"]["run"])
+        assert any(
+            link["source_id"] == "experiment:exp-local"
+            and link["target_id"] == "run-local:run-local-1"
+            and link["link_type"] == "experiment_to_run"
+            for link in canonical["links"]
+        )
+
 
 class TestJobSummaries:
     def test_summarize_job_truncates_logs(self):
@@ -251,6 +379,28 @@ class TestJobSummaries:
         with pytest.raises(ValueError, match="Unsupported log entity id"):
             fetch_full_entity_log("paper:pap-1", service=ResearchOpsService(store={}, jobs={}))
 
+    def test_fetch_full_run_log_resolves_file_backed_local_run(self, monkeypatch, tmp_path):
+        monkeypatch.chdir(tmp_path)
+        save_run_artifact(
+            "run-local-1",
+            {
+                "run_id": "run-local-1",
+                "experiment_id": "exp-local",
+                "status": "completed",
+                "updated_at": "2026-04-13T18:01:00+00:00",
+            },
+            stdout="local stdout body",
+            stderr="local stderr body",
+            metrics={"score": 1},
+        )
+
+        record = fetch_full_run_log("run-local:run-local-1")
+
+        assert record.entity_id == "run-local:run-local-1"
+        assert record.job_id == "run-local-1"
+        assert record.stdout == "local stdout body"
+        assert record.stderr == "local stderr body"
+
     @pytest.mark.asyncio
     async def test_fetch_full_entity_log_resolves_experiment_to_linked_job(self):
         submit = await handle_submit_job(
@@ -281,4 +431,40 @@ class TestJobSummaries:
 
         with pytest.raises(ValueError, match="has no linked run logs"):
             fetch_full_entity_log(f"experiment:{experiment_id}")
+
+    def test_fetch_full_entity_log_resolves_experiment_to_local_run(self, monkeypatch, tmp_path):
+        monkeypatch.chdir(tmp_path)
+        _store["experiments"].append(
+            {
+                "id": "exp-local",
+                "name": "Local exploit probe",
+                "status": "completed",
+                "hypothesis": "Check local run projection",
+                "description": "",
+                "dataset": "synthetic-local",
+                "model_type": "python-stdlib",
+                "tags": ["local-run"],
+                "results": {"context_mod4_lift": 0.001},
+                "wandb_run_id": "",
+                "created_at": "2026-04-13T18:00:00+00:00",
+                "updated_at": "2026-04-13T18:01:00+00:00",
+            }
+        )
+        save_run_artifact(
+            "run-local-1",
+            {
+                "run_id": "run-local-1",
+                "experiment_id": "exp-local",
+                "status": "completed",
+                "updated_at": "2026-04-13T18:01:00+00:00",
+            },
+            stdout="local stdout body",
+            stderr="local stderr body",
+            metrics={"score": 1},
+        )
+
+        record = fetch_full_entity_log("experiment:exp-local", service=ResearchOpsService(store=_store, jobs={}))
+
+        assert record.job_id == "run-local-1"
+        assert record.stdout == "local stdout body"
 
