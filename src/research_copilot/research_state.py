@@ -43,6 +43,17 @@ AUTONOMOUS_RUNTIME_TERMINAL_STATUSES = frozenset({"completed", "failed"})
 RUNTIME_DIRNAME = "runtime"
 RUNTIME_HISTORY_DIRNAME = "history"
 RUNTIME_EVENTS_DIRNAME = "events"
+ACTIVE_SESSION_SCHEMA_VERSION = "1.0"
+ACTIVE_SESSION_FILENAME = "active-session.json"
+CODEX_RUNTIME_SCHEMA_VERSION = "1.0"
+CODEX_RUNTIME_DIRNAME = "codex"
+CODEX_RUNTIME_ACTIVE_FILENAME = "active.json"
+CODEX_RUNTIME_HISTORY_DIRNAME = "history"
+CODEX_RUNTIME_EVENTS_DIRNAME = "events"
+CODEX_RUNTIME_NUDGES_DIRNAME = "nudges"
+CODEX_RUNTIME_SUMMARIES_DIRNAME = "summaries"
+CODEX_RUNTIME_TRANSPORT_DIRNAME = "transport"
+CODEX_RUNTIME_TERMINAL_STATUSES = frozenset({"completed", "failed", "stopped", "archived"})
 
 
 @dataclass(frozen=True)
@@ -82,6 +93,27 @@ class AutonomousRuntimePaths:
     active: Path
     history: Path
     events: Path
+
+
+@dataclass(frozen=True)
+class ActiveSessionPaths:
+    """Typed path bundle for the persisted active-session resolver artifact."""
+
+    root: Path
+    active: Path
+
+
+@dataclass(frozen=True)
+class CodexRuntimePaths:
+    """Typed path bundle for the Codex-managed runtime artifact family."""
+
+    root: Path
+    active: Path
+    history: Path
+    events: Path
+    nudges: Path
+    summaries: Path
+    transport: Path
 
 
 def utc_now_iso() -> str:
@@ -236,6 +268,22 @@ def _runtime_root(*, create: bool = False) -> Path:
     return runtime_root
 
 
+def get_active_session_paths(*, create: bool = False) -> ActiveSessionPaths:
+    """Return typed paths for the persisted active-session resolver artifact."""
+
+    root = _runtime_root(create=create)
+    return ActiveSessionPaths(
+        root=root,
+        active=root / ACTIVE_SESSION_FILENAME,
+    )
+
+
+def active_session_path() -> Path:
+    """Return the persisted active-session resolver artifact path."""
+
+    return get_active_session_paths(create=False).active
+
+
 def get_autonomous_runtime_paths(*, create: bool = False) -> AutonomousRuntimePaths:
     """Return typed paths for the autonomous runtime artifact family."""
     root = _runtime_root(create=create)
@@ -249,6 +297,39 @@ def get_autonomous_runtime_paths(*, create: bool = False) -> AutonomousRuntimePa
         active=root / AUTONOMOUS_RUNTIME_FILENAME,
         history=history,
         events=events,
+    )
+
+
+def _codex_runtime_root(*, create: bool = False) -> Path:
+    root = _runtime_root(create=create) / CODEX_RUNTIME_DIRNAME
+    if create:
+        root.mkdir(parents=True, exist_ok=True)
+    return root
+
+
+def get_codex_runtime_paths(*, create: bool = False) -> CodexRuntimePaths:
+    """Return typed paths for the Codex-managed runtime artifact family."""
+
+    root = _codex_runtime_root(create=create)
+    history = root / CODEX_RUNTIME_HISTORY_DIRNAME
+    events = root / CODEX_RUNTIME_EVENTS_DIRNAME
+    nudges = root / CODEX_RUNTIME_NUDGES_DIRNAME
+    summaries = root / CODEX_RUNTIME_SUMMARIES_DIRNAME
+    transport = root / CODEX_RUNTIME_TRANSPORT_DIRNAME
+    if create:
+        history.mkdir(parents=True, exist_ok=True)
+        events.mkdir(parents=True, exist_ok=True)
+        nudges.mkdir(parents=True, exist_ok=True)
+        summaries.mkdir(parents=True, exist_ok=True)
+        transport.mkdir(parents=True, exist_ok=True)
+    return CodexRuntimePaths(
+        root=root,
+        active=root / CODEX_RUNTIME_ACTIVE_FILENAME,
+        history=history,
+        events=events,
+        nudges=nudges,
+        summaries=summaries,
+        transport=transport,
     )
 
 
@@ -290,12 +371,14 @@ def save_autonomous_runtime(payload: dict[str, Any]) -> dict[str, Any]:
         normalized.get("schema_version") or AUTONOMOUS_RUNTIME_SCHEMA_VERSION
     )
     _atomic_write_json(get_autonomous_runtime_paths(create=True).active, normalized)
+    refresh_active_session_resolution()
     return normalized
 
 
 def clear_autonomous_runtime() -> None:
     """Remove the active autonomous runtime file if it exists."""
     autonomous_runtime_path().unlink(missing_ok=True)
+    refresh_active_session_resolution()
 
 
 def load_autonomous_runtime_history(run_id: str) -> dict[str, Any]:
@@ -329,7 +412,9 @@ def archive_autonomous_runtime(payload: dict[str, Any] | None = None) -> dict[st
     if not runtime:
         return {}
     runtime["archived_at"] = str(runtime.get("archived_at") or utc_now_iso())
-    return save_autonomous_runtime_history(runtime)
+    archived = save_autonomous_runtime_history(runtime)
+    refresh_active_session_resolution()
+    return archived
 
 
 def list_autonomous_runtime_events(run_id: str) -> list[dict[str, Any]]:
@@ -364,6 +449,387 @@ def append_autonomous_runtime_event(run_id: str, payload: dict[str, Any]) -> dic
     event.setdefault("recorded_at", utc_now_iso())
     _atomic_write_json(event_dir / f"{sequence:06d}.json", event)
     return event
+
+
+def codex_runtime_history_path(session_id: str) -> Path:
+    """Return the archived Codex session path for one session."""
+
+    return get_codex_runtime_paths(create=True).history / f"{_slugify(session_id)}.json"
+
+
+def codex_runtime_events_path(session_id: str, *, create: bool = False) -> Path:
+    """Return the event directory for one Codex session."""
+
+    paths = get_codex_runtime_paths(create=create)
+    event_root = paths.events / _slugify(session_id)
+    if create:
+        event_root.mkdir(parents=True, exist_ok=True)
+    return event_root
+
+
+def codex_runtime_nudges_queue_path(session_id: str, *, create: bool = False) -> Path:
+    """Return the operator nudge queue directory for one Codex session."""
+
+    paths = get_codex_runtime_paths(create=create)
+    queue_root = paths.nudges / _slugify(session_id) / "queue"
+    if create:
+        queue_root.mkdir(parents=True, exist_ok=True)
+    return queue_root
+
+
+def codex_runtime_transport_path(session_id: str) -> Path:
+    """Return the persisted transport metadata path for one Codex session."""
+
+    return get_codex_runtime_paths(create=True).transport / f"{_slugify(session_id)}.json"
+
+
+def codex_runtime_summary_path(session_id: str, turn_id: str | int, *, create: bool = False) -> Path:
+    """Return the persisted visible turn-summary markdown path."""
+
+    paths = get_codex_runtime_paths(create=create)
+    summary_dir = paths.summaries / _slugify(session_id)
+    if create:
+        summary_dir.mkdir(parents=True, exist_ok=True)
+    turn_token = str(turn_id).strip()
+    filename = f"{int(turn_token):06d}.md" if turn_token.isdigit() else f"{_slugify(turn_token)}.md"
+    return summary_dir / filename
+
+
+def _read_json_dict(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        return {}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _string_list(value: Any) -> list[str]:
+    if isinstance(value, (list, tuple)):
+        return [str(item).strip() for item in value if str(item).strip()]
+    if value in ("", None):
+        return []
+    return [str(value).strip()]
+
+
+def _optional_int(value: Any) -> int | None:
+    if value in ("", None):
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _action_label(value: Any) -> str:
+    if isinstance(value, dict):
+        for key in ("summary", "label", "name", "action", "type", "command"):
+            candidate = str(value.get(key) or "").strip()
+            if candidate:
+                return candidate
+        return ""
+    return str(value or "").strip()
+
+
+def codex_session_is_active(payload: dict[str, Any]) -> bool:
+    """Return whether a Codex-managed session should win active-session resolution."""
+
+    session_id = str(payload.get("session_id") or "").strip()
+    if not session_id:
+        return False
+    status = str(payload.get("status") or "").strip().lower()
+    return status not in CODEX_RUNTIME_TERMINAL_STATUSES
+
+
+def load_codex_active_session() -> dict[str, Any]:
+    """Load the active Codex session payload if it exists."""
+
+    return _read_json_dict(get_codex_runtime_paths(create=False).active)
+
+
+def save_codex_active_session(payload: dict[str, Any]) -> dict[str, Any]:
+    """Persist the active Codex session contract atomically."""
+
+    normalized = dict(payload)
+    normalized["schema_version"] = str(normalized.get("schema_version") or CODEX_RUNTIME_SCHEMA_VERSION)
+    normalized["brain_type"] = str(normalized.get("brain_type") or "codex")
+    _atomic_write_json(get_codex_runtime_paths(create=True).active, normalized)
+    refresh_active_session_resolution()
+    return normalized
+
+
+def clear_codex_active_session() -> None:
+    """Remove the active Codex session file if it exists."""
+
+    get_codex_runtime_paths(create=False).active.unlink(missing_ok=True)
+    refresh_active_session_resolution()
+
+
+def load_codex_runtime_history(session_id: str) -> dict[str, Any]:
+    """Load one archived Codex session summary."""
+
+    return _read_json_dict(codex_runtime_history_path(session_id))
+
+
+def save_codex_runtime_history(payload: dict[str, Any]) -> dict[str, Any]:
+    """Persist one archived Codex session summary."""
+
+    session_id = str(payload.get("session_id") or "").strip()
+    if not session_id:
+        raise ValueError("Codex runtime history requires a session_id")
+    normalized = dict(payload)
+    normalized["schema_version"] = str(normalized.get("schema_version") or CODEX_RUNTIME_SCHEMA_VERSION)
+    normalized["brain_type"] = str(normalized.get("brain_type") or "codex")
+    _atomic_write_json(codex_runtime_history_path(session_id), normalized)
+    return normalized
+
+
+def archive_codex_active_session(payload: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Copy the active Codex session payload into history."""
+
+    session = dict(payload or load_codex_active_session())
+    if not session:
+        return {}
+    session["archived_at"] = str(session.get("archived_at") or utc_now_iso())
+    archived = save_codex_runtime_history(session)
+    refresh_active_session_resolution()
+    return archived
+
+
+def list_codex_runtime_events(session_id: str) -> list[dict[str, Any]]:
+    """Load all persisted event entries for one Codex-managed session."""
+
+    event_dir = codex_runtime_events_path(session_id, create=False)
+    if not event_dir.exists():
+        return []
+    events: list[dict[str, Any]] = []
+    for path in sorted(event_dir.glob("*.json")):
+        payload = _read_json_dict(path)
+        if payload:
+            events.append(payload)
+    return events
+
+
+def append_codex_runtime_event(session_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+    """Append one ordered event entry for the Codex session log."""
+
+    event_dir = codex_runtime_events_path(session_id, create=True)
+    existing_sequences = [
+        int(path.stem)
+        for path in event_dir.glob("*.json")
+        if path.stem.isdigit()
+    ]
+    sequence = (max(existing_sequences) if existing_sequences else 0) + 1
+    event = dict(payload)
+    event.setdefault("schema_version", CODEX_RUNTIME_SCHEMA_VERSION)
+    event.setdefault("session_id", session_id)
+    event.setdefault("sequence", sequence)
+    event.setdefault("recorded_at", utc_now_iso())
+    _atomic_write_json(event_dir / f"{sequence:06d}.json", event)
+    return event
+
+
+def save_codex_runtime_transport(session_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+    """Persist transport metadata for a Codex-managed session."""
+
+    normalized = dict(payload)
+    normalized["schema_version"] = str(normalized.get("schema_version") or CODEX_RUNTIME_SCHEMA_VERSION)
+    normalized["session_id"] = str(normalized.get("session_id") or session_id)
+    _atomic_write_json(codex_runtime_transport_path(session_id), normalized)
+    return normalized
+
+
+def load_codex_runtime_transport(session_id: str) -> dict[str, Any]:
+    """Load persisted transport metadata for a Codex-managed session."""
+
+    return _read_json_dict(codex_runtime_transport_path(session_id))
+
+
+def save_codex_turn_summary(session_id: str, turn_id: str | int, summary: str) -> Path:
+    """Persist one visible Codex turn summary markdown artifact."""
+
+    path = codex_runtime_summary_path(session_id, turn_id, create=True)
+    _atomic_write_text(path, summary)
+    return path
+
+
+def load_codex_turn_summary(session_id: str, turn_id: str | int) -> str:
+    """Load one visible Codex turn summary markdown artifact."""
+
+    path = codex_runtime_summary_path(session_id, turn_id, create=False)
+    return path.read_text(encoding="utf-8") if path.exists() else ""
+
+
+def _normalize_codex_active_session(payload: dict[str, Any]) -> dict[str, Any]:
+    transport_payload = payload.get("transport")
+    transport = dict(transport_payload) if isinstance(transport_payload, dict) else {}
+    last_action_payload = payload.get("last_action")
+    return {
+        "schema_version": ACTIVE_SESSION_SCHEMA_VERSION,
+        "source": "codex",
+        "brain_type": "codex",
+        "session_id": str(payload.get("session_id") or ""),
+        "run_id": str(payload.get("session_id") or ""),
+        "status": str(payload.get("status") or "running"),
+        "goal": str(payload.get("goal") or ""),
+        "constraints": _string_list(payload.get("constraints")),
+        "allowed_actions": _string_list(payload.get("allowed_actions")),
+        "current_turn": _optional_int(payload.get("current_turn")),
+        "current_phase": str(
+            payload.get("current_turn_state") or payload.get("current_phase") or payload.get("status") or ""
+        ),
+        "iteration": _optional_int(payload.get("current_turn")) or 0,
+        "max_iterations": None,
+        "summary": str(payload.get("last_summary") or payload.get("summary") or ""),
+        "last_summary": str(payload.get("last_summary") or payload.get("summary") or ""),
+        "last_action": _action_label(last_action_payload),
+        "last_action_status": str(payload.get("last_action_status") or ""),
+        "last_experiment_id": str(payload.get("last_experiment_id") or ""),
+        "last_review_id": str(payload.get("last_review_id") or ""),
+        "last_context_update": str(payload.get("last_context_update") or ""),
+        "profile_name": str(payload.get("profile_name") or ""),
+        "autonomy_level": str(payload.get("autonomy_level") or ""),
+        "started_at": str(payload.get("started_at") or ""),
+        "updated_at": str(payload.get("updated_at") or ""),
+        "last_heartbeat_at": str(payload.get("last_heartbeat_at") or ""),
+        "lease_expires_at": "",
+        "completed_at": str(payload.get("completed_at") or ""),
+        "stop_requested_at": str(payload.get("stop_requested_at") or ""),
+        "stop_reason": str(payload.get("stop_reason") or ""),
+        "consecutive_failures": _optional_int(payload.get("consecutive_failures")) or 0,
+        "operator_mode": str(payload.get("operator_mode") or ""),
+        "pending_nudge_count": _optional_int(payload.get("pending_nudge_count")) or 0,
+        "transport": str(
+            payload.get("transport")
+            if isinstance(payload.get("transport"), str)
+            else transport.get("type") or payload.get("transport_type") or ""
+        ),
+        "pane_id": str(payload.get("pane_id") or transport.get("pane_id") or ""),
+        "window_name": str(payload.get("window_name") or transport.get("window_name") or ""),
+        "session_name": str(payload.get("session_name") or transport.get("session_name") or ""),
+        "workspace": str(payload.get("workspace") or transport.get("workspace") or ""),
+        "resolved_at": utc_now_iso(),
+        "active": True,
+    }
+
+
+def _normalize_autonomous_active_session(payload: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "schema_version": ACTIVE_SESSION_SCHEMA_VERSION,
+        "source": "autonomous",
+        "brain_type": str(payload.get("brain_type") or "autonomous"),
+        "session_id": "",
+        "run_id": str(payload.get("run_id") or ""),
+        "status": str(payload.get("status") or "unknown"),
+        "goal": str(payload.get("goal") or ""),
+        "constraints": _string_list(payload.get("constraints")),
+        "allowed_actions": _string_list(payload.get("allowed_actions")),
+        "current_turn": None,
+        "current_phase": str(payload.get("current_phase") or ""),
+        "iteration": _optional_int(payload.get("iteration")) or 0,
+        "max_iterations": _optional_int(payload.get("max_iterations")),
+        "summary": str(payload.get("summary") or ""),
+        "last_summary": str(payload.get("summary") or ""),
+        "last_action": _action_label(payload.get("last_action")),
+        "last_action_status": str(payload.get("last_action_status") or ""),
+        "last_experiment_id": str(payload.get("last_experiment_id") or ""),
+        "last_review_id": str(payload.get("last_review_id") or ""),
+        "last_context_update": "",
+        "profile_name": str(payload.get("profile_name") or ""),
+        "autonomy_level": str(payload.get("autonomy_level") or ""),
+        "started_at": str(payload.get("started_at") or ""),
+        "updated_at": str(payload.get("updated_at") or ""),
+        "last_heartbeat_at": str(payload.get("last_heartbeat_at") or ""),
+        "lease_expires_at": str(payload.get("lease_expires_at") or ""),
+        "completed_at": str(payload.get("completed_at") or ""),
+        "stop_requested_at": str(payload.get("stop_requested_at") or ""),
+        "stop_reason": str(payload.get("stop_reason") or ""),
+        "consecutive_failures": _optional_int(payload.get("consecutive_failures")) or 0,
+        "operator_mode": "hands_off",
+        "pending_nudge_count": 0,
+        "transport": "managed-process" if payload.get("owner_pid") else "",
+        "pane_id": "",
+        "window_name": "",
+        "session_name": "",
+        "workspace": "",
+        "resolved_at": utc_now_iso(),
+        "active": True,
+    }
+
+
+def _inactive_active_session() -> dict[str, Any]:
+    return {
+        "schema_version": ACTIVE_SESSION_SCHEMA_VERSION,
+        "source": "none",
+        "brain_type": "",
+        "session_id": "",
+        "run_id": "",
+        "status": "idle",
+        "goal": "",
+        "constraints": [],
+        "allowed_actions": [],
+        "current_turn": None,
+        "current_phase": "",
+        "iteration": 0,
+        "max_iterations": None,
+        "summary": "",
+        "last_summary": "",
+        "last_action": "",
+        "last_action_status": "",
+        "last_experiment_id": "",
+        "last_review_id": "",
+        "last_context_update": "",
+        "profile_name": "",
+        "autonomy_level": "",
+        "started_at": "",
+        "updated_at": "",
+        "last_heartbeat_at": "",
+        "lease_expires_at": "",
+        "completed_at": "",
+        "stop_requested_at": "",
+        "stop_reason": "",
+        "consecutive_failures": 0,
+        "operator_mode": "",
+        "pending_nudge_count": 0,
+        "transport": "",
+        "pane_id": "",
+        "window_name": "",
+        "session_name": "",
+        "workspace": "",
+        "resolved_at": utc_now_iso(),
+        "active": False,
+    }
+
+
+def resolve_active_session(*, persist: bool = False) -> dict[str, Any]:
+    """Resolve the authoritative live runtime across Codex and legacy runtime surfaces."""
+
+    codex_session = load_codex_active_session()
+    if codex_session_is_active(codex_session):
+        resolved = _normalize_codex_active_session(codex_session)
+    else:
+        autonomous_runtime = load_autonomous_runtime()
+        resolved = (
+            _normalize_autonomous_active_session(autonomous_runtime)
+            if autonomous_runtime_is_active(autonomous_runtime)
+            else _inactive_active_session()
+        )
+    if persist:
+        _atomic_write_json(get_active_session_paths(create=True).active, resolved)
+    return resolved
+
+
+def refresh_active_session_resolution() -> dict[str, Any]:
+    """Persist and return the current authoritative active-session resolution."""
+
+    return resolve_active_session(persist=True)
+
+
+def load_active_session_resolution() -> dict[str, Any]:
+    """Load the persisted active-session resolver output if it exists."""
+
+    return _read_json_dict(active_session_path())
 
 
 def mint_owner_token() -> str:
