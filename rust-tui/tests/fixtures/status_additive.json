@@ -1,0 +1,113 @@
+{
+  "ok": true,
+  "schema_version": "1.0",
+  "timestamp": "2026-04-14T00:00:00+00:00",
+  "workspace": "G:\\Projects\\research-copilot",
+  "extra_top_level": {
+    "source": "future-cli",
+    "notes": ["additive fields should remain harmless"]
+  },
+  "data": {
+    "config": {
+      "api_key_set": false,
+      "budget_usd": 5.0,
+      "model": "claude-sonnet-4-6",
+      "profile": "observer"
+    },
+    "integrations": {
+      "arxiv": true,
+      "semantic_scholar_api_key": false,
+      "slurm": false,
+      "wandb": false,
+      "codex": true
+    },
+    "workspace": {
+      "directory": "G:\\Projects\\research-copilot",
+      "invocation_directory": "G:\\Projects\\research-copilot",
+      "mode": "canonical",
+      "research_root": "G:\\Projects\\research-copilot\\.research-copilot",
+      "display_name": "research-copilot"
+    },
+    "snapshot": {
+      "schema_version": "1.0.0",
+      "snapshot_owner": "research_copilot.services.workflow_snapshot.build_canonical_snapshot",
+      "snapshot_state": "complete",
+      "experiment_status_counts": {
+        "queued": 1,
+        "running": 1
+      },
+      "runtime": {
+        "brain_driver": "codex",
+        "status": "running",
+        "current_phase": "thinking",
+        "goal": "Smoke test runtime",
+        "summary": "First bounded turn.",
+        "last_action": "review-results",
+        "freshness_label": "fresh",
+        "freshness_state": "fresh",
+        "operator_mode": "steerable",
+        "pending_nudge_count": 2,
+        "transport": "tmux-pane",
+        "pane_id": "%73",
+        "transport_metadata": {
+          "session_name": "research-runtime",
+          "window_name": "leader"
+        }
+      },
+      "jobs": [
+        {
+          "job_id": "job-1",
+          "name": "LCDB baseline",
+          "status": "RUNNING",
+          "partition": "gpu",
+          "submitted_at": "2026-04-11T13:00:00+00:00",
+          "log_tail": "epoch=1\nval_loss=0.42",
+          "labels": {
+            "owner": "team-red"
+          }
+        }
+      ],
+      "experiments": [
+        {
+          "experiment_id": "exp-1",
+          "name": "PFN baseline",
+          "status": "running",
+          "dataset": "LCDB",
+          "model_type": "PFN",
+          "updated_at": "2026-04-11T13:10:00+00:00",
+          "results_summary": "val_loss: 0.42",
+          "tags": ["baseline"]
+        }
+      ],
+      "insights": [
+        {
+          "title": "Warmup helps",
+          "confidence": "0.91",
+          "content": "Warmup keeps loss stable.",
+          "kind": "observation"
+        }
+      ],
+      "papers": [
+        {
+          "title": "PFNs for Learning Curves",
+          "year": "2024",
+          "relevance_notes": "Relevant to the PFN baseline.",
+          "authors": ["Example Author"]
+        }
+      ],
+      "context_entries": [
+        {
+          "key": "next_step",
+          "context_type": "goal",
+          "value": "Compare against LightGBM baseline.",
+          "priority": "high"
+        }
+      ],
+      "panels": {
+        "overview": {
+          "hint": "future additive panel metadata"
+        }
+      }
+    }
+  }
+}

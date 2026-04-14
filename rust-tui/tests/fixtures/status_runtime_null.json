@@ -1,0 +1,67 @@
+{
+  "ok": true,
+  "schema_version": "1.0",
+  "timestamp": "2026-04-14T18:25:00+00:00",
+  "workspace": "fixture-workspace",
+  "data": {
+    "config": {
+      "api_key_set": false,
+      "budget_usd": 10.0,
+      "model": "gpt-5.4-mini"
+    },
+    "integrations": {
+      "arxiv": true,
+      "semantic_scholar_api_key": false,
+      "slurm": false,
+      "wandb": false
+    },
+    "workspace": {
+      "directory": "fixture-workspace",
+      "invocation_directory": "fixture-workspace",
+      "mode": "canonical",
+      "research_root": "fixture-workspace/.research-copilot"
+    },
+    "snapshot": {
+      "schema_version": "1.0.0",
+      "snapshot_owner": "research_copilot.services.workflow_snapshot.build_canonical_snapshot",
+      "snapshot_state": "complete",
+      "experiment_status_counts": {
+        "queued": 1
+      },
+      "runtime": null,
+      "jobs": [],
+      "experiments": [
+        {
+          "experiment_id": "exp-runtime-null",
+          "name": "Runtime-free fallback contract",
+          "status": "queued",
+          "dataset": "Fixtures",
+          "model_type": "Regression",
+          "updated_at": "2026-04-14T18:20:00+00:00",
+          "results_summary": "Bridge can still render research records without live runtime metadata."
+        }
+      ],
+      "insights": [
+        {
+          "title": "Runtime-free fallback contract",
+          "confidence": "0.66",
+          "content": "Bridge can still render research records without live runtime metadata."
+        }
+      ],
+      "papers": [
+        {
+          "title": "Graceful Degradation for Operator Dashboards",
+          "year": "2024",
+          "relevance_notes": "Encourages keeping read-only panes useful even when runtime state is absent."
+        }
+      ],
+      "context_entries": [
+        {
+          "key": "fallback_mode",
+          "context_type": "note",
+          "value": "Research and experiment panes should remain useful without runtime state."
+        }
+      ]
+    }
+  }
+}

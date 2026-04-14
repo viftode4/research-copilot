@@ -1,0 +1,25 @@
+{
+  "ok": true,
+  "schema_version": "1.0",
+  "timestamp": "2026-04-14T00:00:00+00:00",
+  "workspace": "G:\\Projects\\research-copilot",
+  "data": {
+    "config": {
+      "api_key_set": false,
+      "budget_usd": 5.0,
+      "model": "claude-sonnet-4-6"
+    },
+    "integrations": {
+      "arxiv": true,
+      "semantic_scholar_api_key": false,
+      "slurm": false,
+      "wandb": false
+    },
+    "workspace": {
+      "directory": "G:\\Projects\\research-copilot",
+      "invocation_directory": "G:\\Projects\\research-copilot",
+      "mode": "canonical",
+      "research_root": "G:\\Projects\\research-copilot\\.research-copilot"
+    }
+  }
+}

@@ -1,0 +1,127 @@
+{
+  "ok": true,
+  "schema_version": "1.0",
+  "timestamp": "2026-04-14T18:15:00+00:00",
+  "workspace": "G:\\Projects\\research-copilot",
+  "error": null,
+  "data": {
+    "config": {
+      "api_key_set": false,
+      "budget_usd": 8.0,
+      "model": "gpt-5.4"
+    },
+    "integrations": {
+      "arxiv": true,
+      "semantic_scholar_api_key": true,
+      "slurm": false,
+      "wandb": false
+    },
+    "workspace": {
+      "directory": "G:\\Projects\\research-copilot",
+      "invocation_directory": "G:\\Projects\\research-copilot",
+      "mode": "canonical",
+      "research_root": "G:\\Projects\\research-copilot\\.research-copilot"
+    },
+    "snapshot": {
+      "schema_version": "1.0.0",
+      "snapshot_owner": "research_copilot.services.workflow_snapshot.build_canonical_snapshot",
+      "snapshot_state": "complete",
+      "experiment_status_counts": {
+        "running": 1,
+        "queued": 1,
+        "completed": 1
+      },
+      "runtime": {
+        "brain_driver": "codex",
+        "status": "running",
+        "current_phase": "reviewing-layout",
+        "goal": "Polish the Rust TUI for operators",
+        "summary": "Comparing experiment and research panes.",
+        "last_action": "review-results",
+        "freshness_label": "fresh • heartbeat 4s ago",
+        "freshness_state": "fresh",
+        "operator_mode": "steerable",
+        "pending_nudge_count": 1,
+        "transport": "tmux-pane",
+        "pane_id": "%88",
+        "is_active": true,
+        "is_stale": false,
+        "iteration": 4,
+        "run_id": "runtime-polish-01",
+        "session_id": "runtime-polish-01",
+        "window_name": "leader",
+        "workspace": "G:\\Projects\\research-copilot"
+      },
+      "jobs": [
+        {
+          "job_id": "job-1",
+          "name": "LCDB baseline",
+          "status": "RUNNING",
+          "partition": "gpu",
+          "submitted_at": "2026-04-14T17:10:00+00:00",
+          "log_tail": "epoch=2\nval_loss=0.39"
+        }
+      ],
+      "experiments": [
+        {
+          "experiment_id": "exp-1",
+          "name": "PFN baseline",
+          "status": "running",
+          "dataset": "LCDB",
+          "model_type": "PFN",
+          "updated_at": "2026-04-14T17:12:00+00:00",
+          "results_summary": "Validation loss trending down while the queue drains."
+        },
+        {
+          "experiment_id": "exp-2",
+          "name": "Ablation: warmup",
+          "status": "queued",
+          "dataset": "LCDB",
+          "model_type": "PFN + warmup",
+          "updated_at": "2026-04-14T17:25:00+00:00",
+          "results_summary": "Waiting for GPU capacity; hypothesis is smoother early-epoch stability."
+        },
+        {
+          "experiment_id": "exp-3",
+          "name": "LightGBM baseline",
+          "status": "completed",
+          "dataset": "LCDB",
+          "model_type": "LightGBM",
+          "updated_at": "2026-04-14T16:48:00+00:00",
+          "results_summary": "Strong tabular baseline but weaker uncertainty calibration than PFN."
+        }
+      ],
+      "insights": [
+        {
+          "title": "Warmup reduces early instability",
+          "confidence": "0.93",
+          "content": "Operators can explain the first-epoch variance once warmup is visible beside the selected experiment."
+        },
+        {
+          "title": "Queue backlog hides regressions",
+          "confidence": "0.81",
+          "content": "Queued ablations need clearer visibility so layout work does not mask delayed failures."
+        }
+      ],
+      "papers": [
+        {
+          "title": "Operator dashboards for research loops",
+          "year": "2025",
+          "relevance_notes": "Supports a denser split-view layout where evidence stays adjacent to the active experiment."
+        }
+      ],
+      "context_entries": [
+        {
+          "key": "ui_direction",
+          "context_type": "constraint",
+          "value": "Prefer lazygit-style density over sparse card layouts."
+        },
+        {
+          "key": "decision_boundary",
+          "context_type": "note",
+          "value": "Rust TUI remains read-only while Python owns workflow mutations."
+        }
+      ]
+    }
+  }
+}

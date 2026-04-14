@@ -1,0 +1,145 @@
+{
+  "ok": true,
+  "schema_version": "1.0",
+  "timestamp": "2026-04-14T17:10:00+00:00",
+  "workspace": "G:\\Projects\\research-copilot",
+  "error": null,
+  "data": {
+    "config": {
+      "api_key_set": false,
+      "budget_usd": 5.0,
+      "model": "claude-sonnet-4-6"
+    },
+    "integrations": {
+      "arxiv": true,
+      "semantic_scholar_api_key": true,
+      "slurm": false,
+      "wandb": true
+    },
+    "workspace": {
+      "directory": "G:\\Projects\\research-copilot",
+      "invocation_directory": "G:\\Projects\\research-copilot",
+      "mode": "canonical",
+      "research_root": "G:\\Projects\\research-copilot\\.research-copilot"
+    },
+    "onboarding": {},
+    "snapshot": {
+      "schema_version": "1.0.0",
+      "snapshot_owner": "research_copilot.services.workflow_snapshot.build_canonical_snapshot",
+      "snapshot_state": "complete",
+      "actions_by_entity": {},
+      "links_by_entity": {},
+      "experiment_status_counts": {
+        "running": 1,
+        "queued": 1,
+        "completed": 1
+      },
+      "runtime": {
+        "brain_driver": "codex",
+        "status": "running",
+        "current_phase": "reviewing",
+        "goal": "Improve the operator dashboard",
+        "summary": "Rendering richer experiment and research snapshots.",
+        "last_action": "publish-dashboard-state",
+        "freshness_label": "fresh • heartbeat 12s ago",
+        "freshness_state": "fresh",
+        "operator_mode": "steerable",
+        "pending_nudge_count": 2,
+        "transport": "tmux-pane",
+        "pane_id": "%73",
+        "session_id": "codex-runtime-polished",
+        "run_id": "codex-runtime-polished",
+        "workspace": "G:\\Projects\\research-copilot",
+        "window_name": "polished",
+        "last_heartbeat_at": "2026-04-14T17:09:48+00:00",
+        "last_experiment_id": "exp-2",
+        "is_active": true,
+        "is_stale": false,
+        "iteration": 4
+      },
+      "jobs": [
+        {
+          "job_id": "job-1",
+          "name": "LCDB baseline",
+          "status": "RUNNING",
+          "partition": "gpu",
+          "submitted_at": "2026-04-11T13:00:00+00:00",
+          "log_tail": "epoch=1\nval_loss=0.42"
+        },
+        {
+          "job_id": "job-2",
+          "name": "Ablation sweep",
+          "status": "QUEUED",
+          "partition": "cpu",
+          "submitted_at": "2026-04-14T12:10:00+00:00",
+          "log_tail": "waiting for slot"
+        }
+      ],
+      "experiments": [
+        {
+          "experiment_id": "exp-1",
+          "name": "PFN baseline",
+          "status": "running",
+          "dataset": "LCDB",
+          "model_type": "PFN",
+          "updated_at": "2026-04-11T13:10:00+00:00",
+          "results_summary": "val_loss: 0.42"
+        },
+        {
+          "experiment_id": "exp-2",
+          "name": "Ablation sweep",
+          "status": "queued",
+          "dataset": "OpenML-CTR23",
+          "model_type": "XGBoost + PFN",
+          "updated_at": "2026-04-14T16:55:00+00:00",
+          "results_summary": "Waiting for cluster capacity before running the full ablation matrix."
+        },
+        {
+          "experiment_id": "exp-3",
+          "name": "LightGBM control",
+          "status": "completed",
+          "dataset": "LCDB",
+          "model_type": "LightGBM",
+          "updated_at": "2026-04-12T09:05:00+00:00",
+          "results_summary": "Strong tabular baseline with stable validation accuracy."
+        }
+      ],
+      "insights": [
+        {
+          "title": "Warmup helps",
+          "confidence": "0.91",
+          "content": "Warmup keeps loss stable and prevents early oscillation."
+        },
+        {
+          "title": "CPU queue is the bottleneck",
+          "confidence": "0.74",
+          "content": "Ablation work is blocked by CPU partition availability rather than model failures."
+        }
+      ],
+      "papers": [
+        {
+          "title": "PFNs for Learning Curves",
+          "year": "2024",
+          "relevance_notes": "Explains why PFNs remain the right comparison for the current baseline."
+        },
+        {
+          "title": "Benchmarking Tabular Foundation Models",
+          "year": "2025",
+          "relevance_notes": "Useful prior art for the ablation plan and evaluation framing."
+        }
+      ],
+      "context_entries": [
+        {
+          "key": "next_step",
+          "context_type": "goal",
+          "value": "Compare the PFN and LightGBM baselines before widening the ablation matrix."
+        },
+        {
+          "key": "operator_note",
+          "context_type": "constraint",
+          "value": "Keep the Rust dashboard read-only while the Python workflow layer remains authoritative."
+        }
+      ]
+    }
+  }
+}

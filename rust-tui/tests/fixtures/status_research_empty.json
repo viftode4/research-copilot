@@ -1,0 +1,58 @@
+{
+  "ok": true,
+  "schema_version": "1.0",
+  "timestamp": "2026-04-14T18:45:00+00:00",
+  "workspace": "G:\\Projects\\research-copilot",
+  "error": null,
+  "data": {
+    "config": {
+      "api_key_set": false,
+      "budget_usd": 8.0,
+      "model": "gpt-5.4"
+    },
+    "integrations": {
+      "arxiv": false,
+      "semantic_scholar_api_key": false,
+      "slurm": false,
+      "wandb": false
+    },
+    "workspace": {
+      "directory": "G:\\Projects\\research-copilot",
+      "invocation_directory": "G:\\Projects\\research-copilot",
+      "mode": "canonical",
+      "research_root": "G:\\Projects\\research-copilot\\.research-copilot"
+    },
+    "snapshot": {
+      "schema_version": "1.0.0",
+      "snapshot_owner": "research_copilot.services.workflow_snapshot.build_canonical_snapshot",
+      "snapshot_state": "complete",
+      "experiment_status_counts": {},
+      "runtime": {
+        "brain_driver": "codex",
+        "status": "idle",
+        "current_phase": "waiting",
+        "goal": "Await research records",
+        "summary": "No research feed entries yet.",
+        "last_action": "idle",
+        "freshness_label": "fresh",
+        "freshness_state": "fresh",
+        "operator_mode": "paused",
+        "pending_nudge_count": 0,
+        "transport": "tmux-pane",
+        "pane_id": "%89",
+        "is_active": false,
+        "is_stale": false,
+        "iteration": 0,
+        "run_id": "runtime-empty-01",
+        "session_id": "runtime-empty-01",
+        "window_name": "leader",
+        "workspace": "G:\\Projects\\research-copilot"
+      },
+      "jobs": [],
+      "experiments": [],
+      "insights": [],
+      "papers": [],
+      "context_entries": []
+    }
+  }
+}

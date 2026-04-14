@@ -110,6 +110,35 @@ def test_default_cli_invocation_opens_tui_in_initialized_workspace(monkeypatch, 
     assert launch_calls == [tmp_path]
 
 
+def test_status_json_exposes_rust_tui_contract(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+
+    init_result = runner.invoke(cli, ["init"])
+    assert init_result.exit_code == 0, init_result.output
+
+    result = runner.invoke(cli, ["status", "--json"])
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["ok"] is True
+    assert payload["schema_version"] == "1.0"
+
+    data = payload["data"]
+    assert {"config", "integrations", "snapshot", "workspace"} <= set(data.keys())
+
+    snapshot = data["snapshot"]
+    assert snapshot["schema_version"] == "1.0.0"
+    assert snapshot["snapshot_state"] in {"complete", "partial", "loading", "error"}
+    assert isinstance(snapshot["jobs"], list)
+    assert isinstance(snapshot["experiments"], list)
+    assert isinstance(snapshot["insights"], list)
+    assert isinstance(snapshot["papers"], list)
+    assert isinstance(snapshot["context_entries"], list)
+    assert isinstance(snapshot["experiment_status_counts"], dict)
+    assert "runtime" in snapshot
+
+
 def test_workspace_option_can_reopen_last_initialized_workspace(monkeypatch, tmp_path):
     workspace_a = tmp_path / "workspace-a"
     workspace_b = tmp_path / "workspace-b"
@@ -404,7 +433,7 @@ def test_workflow_help_lists_named_commands():
     assert "overfitting-check" in result.output
     assert "next-step" in result.output
     assert "Start with: research-copilot init" in result.output
-    assert "Solo proof:" in result.output
+    assert "cli-scenario.md" in result.output
 
 
 def test_workflow_help_lists_autonomous_lifecycle_commands_when_runtime_lane_is_available():
@@ -415,12 +444,79 @@ def test_workflow_help_lists_autonomous_lifecycle_commands_when_runtime_lane_is_
     result = runner.invoke(cli, ["workflow", "--help"])
 
     assert result.exit_code == 0
+    assert "codex-bootstrap" in result.output
     assert "autonomous-start" in result.output
     assert "autonomous-continue" in result.output
     assert "autonomous-run" in result.output
     assert "autonomous-status" in result.output
     assert "autonomous-stop" in result.output
     assert "autonomous-resume" in result.output
+
+
+def test_workflow_codex_bootstrap_registers_passive_codex_session(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+
+    result = runner.invoke(
+        cli,
+        [
+            "workflow",
+            "codex-bootstrap",
+            "--session-id",
+            "codex-self-1",
+            "--goal",
+            "Investigate the next bounded step.",
+            "--allowed-action",
+            "run-experiment",
+            "--allowed-action",
+            "review-results",
+            "--json",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)["data"]
+    assert payload["session_id"] == "codex-self-1"
+    assert payload["brain_driver"] == "codex"
+    assert payload["operator_mode"] == "steerable"
+    assert payload["transport"]["type"] == "managed-process"
+    assert payload["bootstrap_mode"] == "codex-first"
+    assert payload["next_command"] == "research-copilot workflow triage --json"
+    assert payload["tui_command"] == "research-copilot tui"
+    assert payload["worker_started"] is False
+
+
+def test_workflow_codex_bootstrap_uses_tmux_transport_when_pane_is_provided(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("research_copilot.services.codex_runtime._tmux_pane_exists", lambda pane_id: pane_id == "%71")
+    monkeypatch.setattr(
+        "research_copilot.services.codex_runtime._tmux_pane_metadata",
+        lambda pane_id: {
+            "pane_id": "%71",
+            "session_name": "codex-pane",
+            "window_name": "brain",
+            "workspace": str(tmp_path),
+        },
+    )
+    runner = CliRunner()
+
+    result = runner.invoke(
+        cli,
+        [
+            "workflow",
+            "codex-bootstrap",
+            "--session-id",
+            "codex-pane",
+            "--pane-id",
+            "%71",
+            "--json",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)["data"]
+    assert payload["transport"]["type"] == "tmux-pane"
+    assert payload["transport"]["pane_id"] == "%71"
 
 
 def test_workflow_autonomous_start_reports_generation_and_brain_driver(monkeypatch, tmp_path):

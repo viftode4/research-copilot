@@ -42,6 +42,12 @@ Open the TUI:
 research-copilot
 ```
 
+Experimental Rust TUI scaffold:
+
+```bash
+cargo run --manifest-path rust-tui/Cargo.toml -- --workspace .
+```
+
 If you are operating from another shell against an already-initialized workspace, set the workspace explicitly:
 
 ```bash
